@@ -63,11 +63,14 @@ public class ClientEvents {
     private long lastGunShootTime = 0L;
     private static final int MAX_LOST_GRACE_TICKS = 20; // 视线丢失 20 tick (1秒) 宽容期
 
-    // --- 枪械自动换弹节流控制 (Throttled Auto-Reload) ---
+    // --- 枪械自动换弹节流控制与死锁锁止 (Throttled Auto-Reload & Lockout) ---
     private long lastAutoReloadCheckTime = 0L;
     private long lastAutoReloadTriggerTime = 0L;
     private boolean cachedHasInventoryAmmo = true;
     private ItemStack lastAutoReloadItem = ItemStack.EMPTY;
+    private int autoReloadRetryCount = 0;
+    private boolean autoReloadLockout = false;
+    private static final int MAX_RELOAD_RETRIES = 3;
 
     // --- 鼠标死区与目标切换机制 (Mouse Deadzone & Flick Switch) ---
     private float mouseDeflectionYaw = 0f;
@@ -265,29 +268,44 @@ public class ClientEvents {
                     }
 
                     long now = System.currentTimeMillis();
-                    if (mainHand != lastAutoReloadItem) {
-                        lastAutoReloadItem = mainHand;
+                    if (!ItemStack.isSameItemSameTags(mainHand, lastAutoReloadItem)) {
+                        lastAutoReloadItem = mainHand.copy();
                         lastAutoReloadTriggerTime = 0L;
+                        autoReloadRetryCount = 0;
+                        autoReloadLockout = false;
                     }
 
-                    // 关键核心防失败机制：打出最后一发子弹后，枪械射击后坐与射击间隔冷却尚未结束（TACZ 服务端 shootCoolDown > 0）
-                    // 若在此冷却窗口内发送换弹，服务端会拒收丢弃，导致客户端空播换弹动画但子弹不增加！
-                    // 因此必须确保距离最后一发射击至少已过 200ms（冷却彻底清零），方可稳健发起换弹
-                    if (now - lastGunShootTime >= 200L) {
-                        // 检测背包是否真正有备用子弹 (含 TACZ 弹药箱 / 创造模式)
-                        boolean hasAmmo = com.xdyyj.autoattacker.weapon.FirearmAdapter.hasInventoryAmmo(player, mainHand);
-                        if (hasAmmo) {
-                            // 换弹防重保护：重试防抖间隔 1200ms，杜绝高频重复触发
-                            if (now - lastAutoReloadTriggerTime > 1200L) {
-                                lastAutoReloadTriggerTime = now;
-                                com.xdyyj.autoattacker.weapon.FirearmAdapter.triggerReload(player);
+                    if (!autoReloadLockout) {
+                        // 关键核心防失败机制：根据枪械 RPM 动态计算射击冷却缓冲时间，确保服务端 shootCoolDown 彻底清零
+                        // 射击间隔 ms = 60000 / RPM (如 600 RPM -> 100ms)，加上 150ms 掉包/网络 tick 缓冲，最少 200ms
+                        int rpm = (gunStatus.rpm > 0) ? gunStatus.rpm : 600;
+                        long requiredBufferMs = Math.max(200L, (60000L / rpm) + 150L);
+
+                        if (now - lastGunShootTime >= requiredBufferMs) {
+                            // 检测背包是否真正有备用子弹 (含 TACZ 弹药箱 / 创造模式)
+                            boolean hasAmmo = com.xdyyj.autoattacker.weapon.FirearmAdapter.hasInventoryAmmo(player, mainHand);
+                            if (hasAmmo) {
+                                // 换弹防重保护：重试防抖间隔 1200ms，杜绝高频重复触发
+                                if (now - lastAutoReloadTriggerTime > 1200L) {
+                                    if (autoReloadRetryCount >= MAX_RELOAD_RETRIES) {
+                                        autoReloadLockout = true;
+                                    } else {
+                                        lastAutoReloadTriggerTime = now;
+                                        autoReloadRetryCount++;
+                                        com.xdyyj.autoattacker.weapon.FirearmAdapter.triggerReload(player);
+                                    }
+                                }
+                            } else {
+                                autoReloadLockout = true;
                             }
                         }
                     }
-                    // 若背包无备弹，绝不触发换弹操作，彻底消除无弹药时的无限换弹死循环
+                    // 若处于锁止或无备弹，绝不重复发送换弹发包，彻底消除死循环
                 } else if (gunStatus.totalAmmo > 0) {
-                    // 枪内有子弹时重置触发标记，确保打空当瞬能第一时间就绪换弹
+                    // 枪内有子弹时重置触发标记与锁止，确保打空当瞬能第一时间就绪换弹
                     lastAutoReloadTriggerTime = 0L;
+                    autoReloadRetryCount = 0;
+                    autoReloadLockout = false;
                 }
 
                 if (AutoAttackerConfig.ENABLE_GUN_TRIGGERBOT.get() && currentTarget != null && currentTarget.isAlive() && hasLineOfSightMultiPoint(player, currentTarget)) {
@@ -823,15 +841,19 @@ public class ClientEvents {
 
             float recoilMult = (float) AutoAttackerConfig.ANTI_RECOIL_STRENGTH.get().doubleValue();
 
+            // 玩家手动甩动/拉枪阻尼：若检测到玩家主动移动鼠标偏转视角，按位移幅度动态削减压枪下压刚度，绝不跟玩家手感抢夺控制权
+            double userDeflection = Math.hypot(mouseDeflectionYaw, mouseDeflectionPitch);
+            float userDamping = (float) Mth.clamp(1.0 - (userDeflection / 10.0), 0.2, 1.0);
+
             // 当枪械处于射击状态且准星被后坐力抬高 (deltaX > 0，即玩家视线向上偏离目标，需要下压纠正) 时：
             // 远距离 (如 68m) 角误差对准星偏移极其敏感，必须提供强劲充沛的下压刚度，绝不能被 0.48 封顶卡死！
             if (isGunFiring && deltaX > 0) {
                 float distBoost = (float) Mth.clamp(targetDistXZ / 30.0, 1.0, 2.2);
-                factorPitch = Math.min(0.92f, baseFactor + 0.38f * recoilMult * smoothedRecoilBoost * distBoost);
+                factorPitch = Math.min(0.92f, baseFactor + 0.38f * recoilMult * smoothedRecoilBoost * distBoost * userDamping);
             } else {
-                factorPitch = Math.min(0.60f, baseFactor + 0.20f * recoilMult * smoothedRecoilBoost);
+                factorPitch = Math.min(0.60f, baseFactor + 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
             }
-            factorYaw = Math.min(0.45f, baseFactor + 0.12f * recoilMult * smoothedRecoilBoost);
+            factorYaw = Math.min(0.45f, baseFactor + 0.12f * recoilMult * smoothedRecoilBoost * userDamping);
         } else {
             smoothedRecoilBoost = 0.0f;
         }
