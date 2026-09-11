@@ -1265,7 +1265,7 @@ public class ClientEvents {
 
         boolean isMoving = (effectiveVel.x * effectiveVel.x + effectiveVel.y * effectiveVel.y + effectiveVel.z * effectiveVel.z) > 0.0004;
         if (!isMoving) {
-            AutoBallisticsTracker.TrajectorySolution staticTraj = AutoBallisticsTracker.solveTrajectory(eye, baseAimPoint, speed, gravity);
+            AutoBallisticsTracker.TrajectorySolution staticTraj = AutoBallisticsTracker.solveTrajectory(player.level(), eye, baseAimPoint, speed, gravity);
             float staticPitch = (staticTraj != null && staticTraj.reachable) ? staticTraj.pitchDeg : baseDirectPitch;
             double staticFlight = (staticTraj != null) ? staticTraj.flightTicks : (baseHorizDist / Math.max(speed, 0.5D));
             return new PredictedAim(baseAimPoint, baseDirectYaw, staticPitch, staticFlight);
@@ -1277,7 +1277,7 @@ public class ClientEvents {
         double maxTicks = Math.min(60.0D, maxDist * 1.5D);
 
         for (int i = 0; i < 3; i++) {
-            bestTraj = AutoBallisticsTracker.solveTrajectory(eye, targetPoint, speed, gravity);
+            bestTraj = AutoBallisticsTracker.solveTrajectory(player.level(), eye, targetPoint, speed, gravity);
             double time;
             if (bestTraj != null && bestTraj.reachable) {
                 time = Mth.clamp(bestTraj.flightTicks, 0.0D, maxTicks);

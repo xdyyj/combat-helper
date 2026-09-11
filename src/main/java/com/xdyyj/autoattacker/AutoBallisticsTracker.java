@@ -6,7 +6,9 @@ import com.google.gson.reflect.TypeToken;
 import com.mojang.logging.LogUtils;
 import org.slf4j.Logger;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.world.level.Level;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
@@ -649,22 +651,26 @@ public final class AutoBallisticsTracker {
 
     /**
      * 前向微元物理模拟：模拟箭矢沿指定仰角发射，在达到目标水平距离时的真实高度落点
-     * 遵循原版物理：pos += vel; vel.x *= 0.99; vel.y = (vel.y - g) * 0.99;
+     * 遵循原版物理与多介质水阻（空气 0.99，水阻 0.60）
      */
-    private static SimResult simulateTrajectory(double targetDist, double targetDy, double speed, double gravity, double drag, double elevAngleRad) {
-        double vx = speed * Math.cos(elevAngleRad);
+    private static SimResult simulateTrajectory(Level level, Vec3 eye, double dirX, double dirZ, double targetDist, double targetDy, double speed, double gravity, double drag, double elevAngleRad) {
+        double vHoriz = speed * Math.cos(elevAngleRad);
         double vy = speed * Math.sin(elevAngleRad);
         double x = 0.0;
         double y = 0.0;
 
         int maxSteps = 300;
         double minY = Math.min(-300.0, targetDy - 100.0);
+
+        int lastBx = Integer.MIN_VALUE, lastBy = Integer.MIN_VALUE, lastBz = Integer.MIN_VALUE;
+        boolean lastIsWater = false;
+
         for (int step = 0; step < maxSteps; step++) {
-            double nextX = x + vx;
+            double nextX = x + vHoriz;
             double nextY = y + vy;
 
             if (nextX >= targetDist) {
-                double frac = (targetDist - x) / Math.max(vx, 1.0E-6);
+                double frac = (targetDist - x) / Math.max(vHoriz, 1.0E-6);
                 frac = Mth.clamp(frac, 0.0, 1.0);
                 double hitY = y + vy * frac;
                 double hitT = step + frac;
@@ -673,23 +679,54 @@ public final class AutoBallisticsTracker {
 
             x = nextX;
             y = nextY;
-            vx *= drag;
-            vy = (vy - gravity) * drag;
+
+            double stepDrag = drag;
+            if (level != null) {
+                double wx = eye.x + x * dirX;
+                double wy = eye.y + y;
+                double wz = eye.z + x * dirZ;
+                int bx = Mth.floor(wx);
+                int by = Mth.floor(wy);
+                int bz = Mth.floor(wz);
+
+                if (bx == lastBx && by == lastBy && bz == lastBz) {
+                    if (lastIsWater) stepDrag = 0.60;
+                } else {
+                    lastBx = bx;
+                    lastBy = by;
+                    lastBz = bz;
+                    BlockPos pos = new BlockPos(bx, by, bz);
+                    lastIsWater = level.isWaterAt(pos);
+                    if (lastIsWater) stepDrag = 0.60;
+                }
+            }
+
+            vHoriz *= stepDrag;
+            vy = (vy - gravity) * stepDrag;
 
             if (y < minY && vy < 0.0) break;
         }
         return new SimResult(y, 300.0, false);
     }
 
+    private static SimResult simulateTrajectory(double targetDist, double targetDy, double speed, double gravity, double drag, double elevAngleRad) {
+        return simulateTrajectory(null, Vec3.ZERO, 1.0, 0.0, targetDist, targetDy, speed, gravity, drag, elevAngleRad);
+    }
+
+    public static TrajectorySolution solveTrajectory(Vec3 eye, Vec3 targetAimPoint, double speed, double gravity) {
+        return solveTrajectory(null, eye, targetAimPoint, speed, gravity);
+    }
+
     /**
-     * 二分求解发射仰角：在 8~16 步内收敛到误差 < 0.005 格的绝对精准仰角
+     * 二分求解发射仰角：在 8~16 步内收敛到误差 < 0.005 格的绝对精准仰角，支持多介质水阻仿真
+     * @param level 世界实例 (用于水体判定)
      * @param eye 玩家眼睛位置
      * @param targetAimPoint 目标期望击中点 (如胸口中上部)
      * @param speed 初速度
      * @param gravity 重力
      * @return TrajectorySolution 包含精确 pitch 和预计飞行时间
      */
-    public static TrajectorySolution solveTrajectory(Vec3 eye, Vec3 targetAimPoint, double speed, double gravity) {
+    public static TrajectorySolution solveTrajectory(Level level, Vec3 eye, Vec3 targetAimPoint, double speed, double gravity) {
         double dx = targetAimPoint.x - eye.x;
         double dz = targetAimPoint.z - eye.z;
         double horizDist = Math.sqrt(dx * dx + dz * dz);
@@ -709,8 +746,10 @@ public final class AutoBallisticsTracker {
             return new TrajectorySolution(directPitch, flightTime, true);
         }
 
+        double dirX = dx / horizDist;
+        double dirZ = dz / horizDist;
+
         // MC 物理二分迭代搜索最优发射仰角 (elevAngle: 向上为正弧度)
-        // 动态自适应边界：根据目标几何视角动态扩展，完美解决高处俯射(-89°)、飞行俯冲与超大角度防空(+89°)问题
         double directAngle = Math.atan2(targetDy, horizDist);
         double low = Math.max(Math.toRadians(-89.5), directAngle - Math.toRadians(5.0));
         double high = Math.min(Math.toRadians(89.5), Math.max(directAngle + Math.toRadians(45.0), Math.toRadians(60.0)));
@@ -722,10 +761,11 @@ public final class AutoBallisticsTracker {
         double bestElev = directAngle;
         double bestFlightTime = totalDist / Math.max(speed, 0.25);
         boolean found = false;
+        boolean bestReached = false;
 
         for (int iter = 0; iter < 16; iter++) {
             double mid = (low + high) * 0.5;
-            SimResult res = simulateTrajectory(horizDist, targetDy, speed, gravity, 0.99, mid);
+            SimResult res = simulateTrajectory(level, eye, dirX, dirZ, horizDist, targetDy, speed, gravity, 0.99, mid);
 
             if (!res.reached) {
                 if (mid > directAngle) {
@@ -736,6 +776,7 @@ public final class AutoBallisticsTracker {
                 continue;
             }
 
+            bestReached = true;
             double diff = res.hitY - targetDy;
             bestElev = mid;
             bestFlightTime = res.flightTicks;
@@ -753,7 +794,8 @@ public final class AutoBallisticsTracker {
         }
 
         float finalPitchDeg = (float) -(bestElev * (180D / Math.PI));
-        return new TrajectorySolution(finalPitchDeg, bestFlightTime, found || bestFlightTime < 200.0);
+        boolean reachable = found || (bestReached && bestFlightTime < 200.0);
+        return new TrajectorySolution(finalPitchDeg, bestFlightTime, reachable);
     }
 
     // =========================================================================

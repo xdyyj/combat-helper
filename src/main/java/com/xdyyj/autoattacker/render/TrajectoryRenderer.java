@@ -7,6 +7,7 @@ import com.xdyyj.autoattacker.AutoBallisticsTracker;
 import com.xdyyj.autoattacker.ClientEvents;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.MultiBufferSource;
@@ -692,7 +693,8 @@ public final class TrajectoryRenderer {
         List<Vec3> points = new ArrayList<>();
         points.add(start);
 
-        double substepDrag = Math.pow(drag, SUBSTEP);
+        int lastBx = Integer.MIN_VALUE, lastBy = Integer.MIN_VALUE, lastBz = Integer.MIN_VALUE;
+        boolean lastIsWater = false;
 
         for (int step = 0; step < MAX_STEPS && traveled < maxLength; step++) {
             Vec3 proposed = position.add(velocity.scale(SUBSTEP));
@@ -717,6 +719,24 @@ public final class TrajectoryRenderer {
             }
             if (traveled >= maxLength - 1.0E-6D) break;
 
+            double currentDrag = drag;
+            if (mc.level != null) {
+                int bx = Mth.floor(position.x);
+                int by = Mth.floor(position.y);
+                int bz = Mth.floor(position.z);
+                if (bx == lastBx && by == lastBy && bz == lastBz) {
+                    if (lastIsWater) currentDrag = 0.60D;
+                } else {
+                    lastBx = bx;
+                    lastBy = by;
+                    lastBz = bz;
+                    BlockPos pos = new BlockPos(bx, by, bz);
+                    lastIsWater = mc.level.isWaterAt(pos);
+                    if (lastIsWater) currentDrag = 0.60D;
+                }
+            }
+
+            double substepDrag = Math.pow(currentDrag, SUBSTEP);
             velocity = velocity.scale(substepDrag).add(0.0D, -gravity * SUBSTEP, 0.0D);
         }
 
