@@ -31,6 +31,7 @@ tmp_test/
 old_mod_backup/
 reference-lib/
 *.log
+logs/
 
 # OS generated
 .DS_Store
