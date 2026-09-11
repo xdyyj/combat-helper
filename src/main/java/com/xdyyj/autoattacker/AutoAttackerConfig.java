@@ -8,6 +8,8 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.item.Item;
 import net.minecraftforge.registries.ForgeRegistries;
+import com.mojang.logging.LogUtils;
+import org.slf4j.Logger;
 
 import java.util.List;
 import java.util.Map;
@@ -16,6 +18,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class AutoAttackerConfig {
     
+    private static final Logger LOGGER = LogUtils.getLogger();
+
     public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec SPEC;
 
@@ -443,7 +447,9 @@ public class AutoAttackerConfig {
     public static void saveConfig() {
         try {
             SPEC.save();
-        } catch (Throwable ignored) {}
+        } catch (Throwable e) {
+            LOGGER.error("Failed to save configuration", e);
+        }
     }
 
     private static void parseKeyValueDoubleMap(List<? extends String> configs, Map<Item, Double> map) {
