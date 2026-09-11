@@ -22,7 +22,7 @@ public class AutoAttacker {
         IEventBus modEventBus = context.getModEventBus();
         
         // 注册配置
-        ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, AutoAttackerConfig.SPEC, "combathelper-client.toml");
+        ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, AutoAttackerConfig.SPEC, AutoAttacker.MODID + "-client.toml");
         
         // 注册配置类监听器 (仅 mod 总线; TagsUpdatedEvent 由 TagsUpdatedHandler 独立处理)
         modEventBus.register(AutoAttackerConfig.class);
