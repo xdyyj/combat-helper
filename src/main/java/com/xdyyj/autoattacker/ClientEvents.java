@@ -2,6 +2,7 @@ package com.xdyyj.autoattacker;
 
 // --- Imports ---
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -248,401 +249,16 @@ public class ClientEvents {
             AutoBallisticsTracker.clientTick();
 
             // --- 1. 自动射箭：满蓄力平滑放箭 (消除暴力瞬移视角抽搐) ---
-            if (AutoAttackerConfig.ENABLE_AUTO_SHOOT.get() && mc.options.keyUse.isDown() && player.isUsingItem()) {
-                ItemStack itemInUse = player.getUseItem();
-                if (!isInSet(itemInUse, AutoAttackerConfig.blacklistItems, AutoAttackerConfig.blacklistTags)) {
-                    if (isBow(itemInUse)) {
-                        HitResult hitResult = mc.hitResult;
-                        if (hitResult != null && hitResult.getType() == HitResult.Type.ENTITY) {
-                            Entity target = ((EntityHitResult) hitResult).getEntity();
-                            if (AutoAttackerConfig.excludedEntities.contains(target.getType())) {
-                                return;
-                            }
-                        }
-
-                        boolean isFullyCharged = AutoBallisticsTracker.isBowFullyCharged(player, itemInUse);
-
-                        if (isFullyCharged) {
-                            InteractionHand hand = player.getUsedItemHand();
-
-                            if (currentTarget != null && currentTarget.isAlive()) {
-                                AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(itemInUse);
-                                Vec3 eye = player.getEyePosition();
-                                double targetDistXZ = Math.hypot(currentTarget.getX() - eye.x, currentTarget.getZ() - eye.z);
-                                double targetY = computeTargetY(currentTarget, 1.0f, AutoAttackerConfig.TARGET_PART.get(), false, true, targetDistXZ);
-                                Vec3 baseAimPoint = new Vec3(currentTarget.getX(), targetY, currentTarget.getZ());
-
-                                float sendYaw = player.getYRot();
-                                float sendPitch = player.getXRot();
-
-                                if (profile.isHoming) {
-                                    double dX = currentTarget.getX() - eye.x;
-                                    double dY = targetY - eye.y;
-                                    double dZ = currentTarget.getZ() - eye.z;
-                                    double horizDist = Math.sqrt(dX * dX + dZ * dZ);
-                                    sendYaw = (float) (Mth.atan2(dZ, dX) * (180D / Math.PI)) - 90.0F;
-                                    sendPitch = (float) -(Mth.atan2(dY, horizDist) * (180D / Math.PI));
-                                } else {
-                                    PredictedAim predicted = computePredictedAim(player, currentTarget, profile.speed, profile.gravity, eye, baseAimPoint);
-                                    if (predicted != null) {
-                                        sendYaw = predicted.targetYaw;
-                                        sendPitch = predicted.targetPitch;
-                                    }
-                                }
-
-                                if (mc.getConnection() != null) {
-                                    mc.getConnection().send(new ServerboundMovePlayerPacket.Rot(sendYaw, sendPitch, player.onGround()));
-                                }
-                            }
-
-                            gameMode.releaseUsingItem(player);
-
-                            boolean isUseKeyPhysicallyDown = com.mojang.blaze3d.platform.InputConstants.isKeyDown(
-                                    mc.getWindow().getWindow(), mc.options.keyUse.getKey().getValue());
-                            if (isUseKeyPhysicallyDown) {
-                                gameMode.useItem(player, hand);
-                            }
-                        }
-                    }
-                }
-            }
+            processAutoBowShooting(mc, player, gameMode);
 
             // --- 1.1 现代枪械自瞄击发 (Firearm Triggerbot) & 智能自动换弹 ---
-            ItemStack mainHand = player.getMainHandItem();
-            boolean isHoldingGun = com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(mainHand);
-            if (isHoldingGun) {
-                com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus gunStatus = 
-                    com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(mainHand);
-
-                // 智能自动换弹：当枪膛与弹匣彻底打空 (totalAmmo == 0) 时触发
-                if (AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD.get() && gunStatus.totalAmmo == 0 &&
-                    !com.xdyyj.autoattacker.weapon.FirearmAdapter.isReloading(player) &&
-                    !com.xdyyj.autoattacker.weapon.FirearmAdapter.isBolting(player)) {
-
-                    // 关键修复：一旦打空子弹，立即松开扳机与攻击键！
-                    // 枪械模组 (TACZ / Point Blank / JEG 等) 在处于射击按键按下状态时会拦截或拒绝换弹请求
-                    if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
-                        com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
-                        gunSemiFireTimer = 0;
-                    }
-
-                    long now = System.currentTimeMillis();
-                    if (!ItemStack.isSameItemSameTags(mainHand, lastAutoReloadItem)) {
-                        lastAutoReloadItem = mainHand.copy();
-                        lastAutoReloadTriggerTime = 0L;
-                        autoReloadRetryCount = 0;
-                        autoReloadLockout = false;
-                    }
-
-                    if (!autoReloadLockout) {
-                        // 关键核心防失败机制：根据枪械 RPM 动态计算射击冷却缓冲时间，确保服务端 shootCoolDown 彻底清零
-                        // 射击间隔 ms = 60000 / RPM (如 600 RPM -> 100ms)，加上 150ms 掉包/网络 tick 缓冲，最少 200ms
-                        int rpm = (gunStatus.rpm > 0) ? gunStatus.rpm : 600;
-                        long requiredBufferMs = Math.max(200L, (60000L / rpm) + 150L);
-
-                        if (now - lastGunShootTime >= requiredBufferMs) {
-                            // 检测背包是否真正有备用子弹 (含 TACZ 弹药箱 / 创造模式)
-                            boolean hasAmmo = com.xdyyj.autoattacker.weapon.FirearmAdapter.hasInventoryAmmo(player, mainHand);
-                            if (hasAmmo) {
-                                // 换弹防重保护：重试防抖间隔 1200ms，杜绝高频重复触发
-                                if (now - lastAutoReloadTriggerTime > 1200L) {
-                                    if (autoReloadRetryCount >= MAX_RELOAD_RETRIES) {
-                                        autoReloadLockout = true;
-                                    } else {
-                                        lastAutoReloadTriggerTime = now;
-                                        autoReloadRetryCount++;
-                                        com.xdyyj.autoattacker.weapon.FirearmAdapter.triggerReload(player);
-                                    }
-                                }
-                            } else {
-                                autoReloadLockout = true;
-                            }
-                        }
-                    }
-                    // 若处于锁止或无备弹，绝不重复发送换弹发包，彻底消除死循环
-                } else if (gunStatus.totalAmmo > 0) {
-                    // 枪内有子弹时重置触发标记与锁止，确保打空当瞬能第一时间就绪换弹
-                    lastAutoReloadTriggerTime = 0L;
-                    autoReloadRetryCount = 0;
-                    autoReloadLockout = false;
-                }
-
-                if (AutoAttackerConfig.ENABLE_GUN_TRIGGERBOT.get() && currentTarget != null && currentTarget.isAlive() && hasLineOfSightMultiPoint(player, currentTarget)) {
-                    // 特殊机制：逐发装填左轮/霰弹枪 (如 Scorched Guns 逐发填装) 遭遇目标打断换弹
-                    // 当枪内已有至少 1 发子弹，且正在逐发装填、眼前有锁定的有效敌人时，立即紧急打断装填就绪击发！
-                    if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isManualReloading(player, mainHand) && gunStatus.totalAmmo >= 1) {
-                        com.xdyyj.autoattacker.weapon.FirearmAdapter.interruptReload(player);
-                    }
-
-                    // 修正：使用 totalAmmo (含枪膛上膛子弹)，彻底解决打空弹匣后总残留 1 发上膛子弹不击发的问题
-                    boolean canShoot = (gunStatus.totalAmmo > 0 || gunStatus.totalAmmo == -1) && 
-                                       !player.getCooldowns().isOnCooldown(mainHand.getItem()) &&
-                                       !com.xdyyj.autoattacker.weapon.FirearmAdapter.isReloading(player) && 
-                                       !com.xdyyj.autoattacker.weapon.FirearmAdapter.isBolting(player);
-                    
-                    if (canShoot) {
-                        float currentYaw = player.getYRot();
-                        float currentPitch = player.getXRot();
-                        float targetAimYaw = (staticLastPredictedAim != null) ? staticLastPredictedAim.targetYaw : staticLastPredictedYaw;
-                        float targetAimPitch = (staticLastPredictedAim != null) ? staticLastPredictedAim.targetPitch : currentPitch;
-                        float yawDiff = Math.abs(Mth.wrapDegrees(targetAimYaw - currentYaw));
-                        float pitchDiff = Math.abs(targetAimPitch - currentPitch);
-                        
-                        // 远距离 (如 68m) 射击时准星容差自适应微缩，提升远距点杀与爆头精度
-                        double targetDist = player.distanceTo(currentTarget);
-                        float maxDiff = (targetDist > 35.0) ? 9.0f : 14.0f;
-
-                        if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isReleaseFire(gunStatus)) {
-                            // 蓄力释放型武器 (如 JEG 复合弓/原始弓 RELEASE_FIRE):
-                            // 机制：严格拉满弓 (20 ticks / 1秒)，满蓄力后当准星就位瞬间松开左键释放箭矢！
-                            gunSemiFireTimer = 0;
-                            if (gunReleaseCoolTicks > 0) {
-                                gunReleaseCoolTicks--;
-                                com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
-                            } else {
-                                int currentHold = com.xdyyj.autoattacker.weapon.FirearmAdapter.getJegHoldFire();
-                                int maxHold = com.xdyyj.autoattacker.weapon.FirearmAdapter.getMaxHoldFire(mainHand);
-                                float progress = com.xdyyj.autoattacker.weapon.FirearmAdapter.getChargeProgress(player, mainHand);
-                                int requiredHold = (maxHold > 0) ? maxHold : 20;
-
-                                // 严格判断是否真正完全拉满弓：
-                                // 1. JEG 客户端 ShootingHandler.get().getHoldFire() 达到上限 (通常为 20)
-                                // 2. 或 ChargeTracker 满蓄力 (1.0f)
-                                // 3. 或连续按住拉弦达到 requiredHold + 4 刻保底 (杜绝未满拉弓提前释放)
-                                boolean isFullyDrawn = (currentHold >= requiredHold && currentHold > 0) || 
-                                                       progress >= 0.99f || 
-                                                       (gunReleaseChargeTicks >= requiredHold + 4);
-
-                                if (!isFullyDrawn) {
-                                    // 阶段 1：蓄力拉弦阶段。坚决按住左键蓄力，绝不可因准星微小偏移松手！
-                                    gunReleaseChargeTicks++;
-                                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
-                                } else {
-                                    // 阶段 2：弓弦已 100% 彻底拉满！进入瞄准就绪释放判定
-                                    if (yawDiff <= maxDiff && pitchDiff <= maxDiff) {
-                                        // 准星锁定在目标容差内，瞬间松开左键，满威力击发出箭！
-                                        lastGunShootTime = System.currentTimeMillis();
-                                        com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
-                                        gunReleaseChargeTicks = 0;
-                                        gunReleaseCoolTicks = 3; // 留 3 ticks 缓冲确保射击与动画结算
-                                    } else {
-                                        // 准星尚未对齐，继续稳稳拉满弓不放，等待自瞄对齐瞬间！
-                                        com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
-                                    }
-                                }
-                            }
-                        } else {
-                            // 普通全自动 / 半自动枪械
-                            gunReleaseChargeTicks = 0;
-                            gunReleaseCoolTicks = 0;
-                            if (yawDiff <= maxDiff && pitchDiff <= maxDiff) {
-                                lastGunShootTime = System.currentTimeMillis();
-                                if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isSemiAuto(gunStatus)) {
-                                    // 半自动武器 (如 Glock, 沙漠之鹰, SPR-15 DMR, 单发步枪/狙击枪):
-                                    // 必须交替扣动与松开扳机 (Tap-Fire) 触发 TACZ 击发并完成扳机重置 (Reset)
-                                    int cycleTicks = Math.max(2, Math.round(1200.0f / Math.max(gunStatus.rpm, 120)));
-                                    gunSemiFireTimer++;
-                                    if (gunSemiFireTimer >= cycleTicks) {
-                                        gunSemiFireTimer = 0;
-                                    }
-                                    if (gunSemiFireTimer == 0) {
-                                        com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
-                                    } else {
-                                        com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
-                                    }
-                                } else {
-                                    // 全自动武器 (如 HK416, AUG, M4A1): 持续压住扳机扫射
-                                    gunSemiFireTimer = 0;
-                                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
-                                }
-                            } else {
-                                gunSemiFireTimer = 999;
-                                com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
-                            }
-                        }
-                    } else {
-                        gunSemiFireTimer = 999;
-                        gunReleaseChargeTicks = 0;
-                        gunReleaseCoolTicks = 0;
-                        com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
-                    }
-                } else {
-                    gunSemiFireTimer = 999;
-                    gunReleaseChargeTicks = 0;
-                    gunReleaseCoolTicks = 0;
-                    if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
-                        com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
-                    }
-                }
-            } else {
-                gunSemiFireTimer = 999;
-                gunReleaseChargeTicks = 0;
-                gunReleaseCoolTicks = 0;
-                if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
-                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
-                }
-            }
+            processFirearmLogic(player);
 
             // --- 2. 目标锁定触发逻辑 (3大自动搜索模式与智能自动切靶) ---
-            boolean isKeyDown = ClientModEvents.LOCK_ON_KEY.isDown();
-            boolean isToggleMode = AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.TOGGLE;
-            boolean isHoldingBow = isRangedWeapon(player.getMainHandItem()) || isRangedWeapon(player.getOffhandItem());
-            boolean isHoldingWeapon = isHoldingBow || 
-                    com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getMainHandItem()) ||
-                    player.getMainHandItem().getItem() instanceof net.minecraft.world.item.SwordItem ||
-                    player.getMainHandItem().getItem() instanceof net.minecraft.world.item.AxeItem ||
-                    player.getMainHandItem().getItem() instanceof net.minecraft.world.item.TridentItem;
-
-            double searchRange = (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get())
-                    ? Math.max(AutoAttackerConfig.AIM_ASSIST_RANGE.get(), AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get())
-                    : AutoAttackerConfig.AIM_ASSIST_RANGE.get();
-
-            if (AutoAttackerConfig.ENABLE_AIM_ASSIST.get()) {
-                AutoAttackerConfig.AutoLockMode lockMode = AutoAttackerConfig.AUTO_LOCK_MODE.get();
-
-                // 2.1 手动快捷键交互 (按键锁定 / 手动解除锁定)
-                if (isKeyDown && !wasLockKeyDown) {
-                    if (currentTarget != null) {
-                        currentTarget = null;
-                        autoLockHoverTarget = null;
-                        autoLockHoverTicks = 0;
-                        lastSwitchTime = System.currentTimeMillis() + 800L; // 手动脱锁赋予 800ms 静默期，避免瞬间重吸
-                    } else {
-                        currentTarget = getPrioritizedTarget(player, searchRange, 60.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
-                    }
-                } else if (!isToggleMode && !isKeyDown && lockMode == AutoAttackerConfig.AutoLockMode.OFF) {
-                    // 长按模式下松开按键脱锁 (仅当自动索敌关闭时)
-                    currentTarget = null;
-                }
-                wasLockKeyDown = isKeyDown;
-
-                // 2.2 自动索敌三种模式执行
-                if (currentTarget == null && System.currentTimeMillis() > lastSwitchTime) {
-                    switch (lockMode) {
-                        case ALWAYS -> {
-                            // 模式 2: 始终自动锁定 (手持武器时生效，视角角度可调)
-                            if (isHoldingWeapon) {
-                                currentTarget = getPrioritizedTarget(player, searchRange, AutoAttackerConfig.AUTO_LOCK_FOV.get().floatValue(), AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
-                            }
-                            autoLockHoverTarget = null;
-                            autoLockHoverTicks = 0;
-                        }
-                        case HOVER -> {
-                            // 模式 1: 准星指向生物 N 秒时自动锁定
-                            LivingEntity pointing = getCrosshairPointingTarget(player, searchRange);
-                            if (pointing != null) {
-                                if (pointing == autoLockHoverTarget) {
-                                    autoLockHoverTicks++;
-                                    int reqTicks = (int) Math.round(AutoAttackerConfig.AUTO_LOCK_HOVER_TIME.get() * 20.0);
-                                    if (reqTicks < 1) reqTicks = 1;
-                                    if (autoLockHoverTicks >= reqTicks) {
-                                        currentTarget = pointing;
-                                        autoLockHoverTarget = null;
-                                        autoLockHoverTicks = 0;
-                                    }
-                                } else {
-                                    autoLockHoverTarget = pointing;
-                                    autoLockHoverTicks = 1;
-                                }
-                            } else {
-                                autoLockHoverTarget = null;
-                                autoLockHoverTicks = 0;
-                            }
-                        }
-                        case OFF -> {
-                            // 模式 3: 关闭自动索敌
-                            autoLockHoverTarget = null;
-                            autoLockHoverTicks = 0;
-                        }
-                    }
-                }
-
-                // 目标丢锁、死亡与自动切换目标 (Auto-Switch Target)
-                if (currentTarget != null) {
-                    double maxLockDist = (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get())
-                            ? Math.max(64.0, AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get())
-                            : 64.0;
-                    boolean isInvalid = !isValidTarget(player, currentTarget);
-                    boolean isOutOfRange = currentTarget.level() != player.level() || currentTarget.distanceToSqr(player) > maxLockDist * maxLockDist;
-
-                    if (isInvalid || isOutOfRange) {
-                        if (AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()) {
-                            // 目标死亡或超距，毫秒级无缝自动寻觅切换下一位最佳目标！
-                            currentTarget = getPrioritizedTarget(player, searchRange, 90.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), currentTarget);
-                            lostTargetGraceTicks = 0;
-                        } else {
-                            currentTarget = null;
-                            lostTargetGraceTicks = 0;
-                        }
-                    } else if (!hasLineOfSightMultiPoint(player, currentTarget)) {
-                        lostTargetGraceTicks++;
-                        if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
-                            if (AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()) {
-                                // 目标长时间隐蔽入掩体，自动转火视野内其他暴露目标
-                                currentTarget = getPrioritizedTarget(player, searchRange, 90.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), currentTarget);
-                                lostTargetGraceTicks = 0;
-                            } else {
-                                currentTarget = null;
-                                lostTargetGraceTicks = 0;
-                            }
-                        }
-                    } else {
-                        lostTargetGraceTicks = 0;
-                    }
-                }
-            } else {
-                currentTarget = null;
-            }
-
-            staticCurrentTarget = currentTarget;
+            processTargetLocking(player);
 
             // 目标运动采样与平滑追踪
-            if (currentTarget != null) {
-                Entity rootVehicle = currentTarget.getRootVehicle();
-                Vec3 measured = new Vec3(
-                        rootVehicle.getX() - rootVehicle.xo,
-                        rootVehicle.getY() - rootVehicle.yo,
-                        rootVehicle.getZ() - rootVehicle.zo
-                );
-                if (measured.lengthSqr() > 36.0) {
-                    measured = Vec3.ZERO;
-                }
-                if (rootVehicle.onGround() && measured.y < 0) {
-                    measured = new Vec3(measured.x, 0, measured.z);
-                }
-
-                if (currentTarget != lastTarget) {
-                    resetTargetTracking();
-                    lastTarget = currentTarget;
-                    smoothedTargetVelocity = measured;
-                    lastMeasuredVelocity = measured;
-                    velSamples[0] = measured;
-                    velSampleIndex = 1;
-                    velSampleCount = 1;
-                } else {
-                    velSamples[velSampleIndex] = measured;
-                    velSampleIndex = (velSampleIndex + 1) % VEL_SAMPLE_CAP;
-                    if (velSampleCount < VEL_SAMPLE_CAP) velSampleCount++;
-
-                    if (velSampleCount == 1) {
-                        smoothedTargetVelocity = measured;
-                    } else if (velSampleCount == 2) {
-                        int p1 = (velSampleIndex - 1 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        int p2 = (velSampleIndex - 2 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        smoothedTargetVelocity = velSamples[p1].scale(0.65).add(velSamples[p2].scale(0.35));
-                    } else {
-                        int p1 = (velSampleIndex - 1 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        int p2 = (velSampleIndex - 2 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        int p3 = (velSampleIndex - 3 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        smoothedTargetVelocity = velSamples[p1].scale(0.55)
-                                .add(velSamples[p2].scale(0.30))
-                                .add(velSamples[p3].scale(0.15));
-                    }
-                    lastMeasuredVelocity = measured;
-                }
-            } else {
-                resetTargetTracking();
-            }
+            updateTargetVelocityTracking();
         }
     }
 
@@ -1507,5 +1123,410 @@ public class ClientEvents {
             if (stack.is(tag)) return true;
         }
         return false;
+    }
+
+    private void updateTargetVelocityTracking() {
+        if (currentTarget != null) {
+            Entity rootVehicle = currentTarget.getRootVehicle();
+            Vec3 measured = new Vec3(
+                    rootVehicle.getX() - rootVehicle.xo,
+                    rootVehicle.getY() - rootVehicle.yo,
+                    rootVehicle.getZ() - rootVehicle.zo
+            );
+            if (measured.lengthSqr() > 36.0) {
+                measured = Vec3.ZERO;
+            }
+            if (rootVehicle.onGround() && measured.y < 0) {
+                measured = new Vec3(measured.x, 0, measured.z);
+            }
+
+            if (currentTarget != lastTarget) {
+                resetTargetTracking();
+                lastTarget = currentTarget;
+                smoothedTargetVelocity = measured;
+                lastMeasuredVelocity = measured;
+                velSamples[0] = measured;
+                velSampleIndex = 1;
+                velSampleCount = 1;
+            } else {
+                velSamples[velSampleIndex] = measured;
+                velSampleIndex = (velSampleIndex + 1) % VEL_SAMPLE_CAP;
+                if (velSampleCount < VEL_SAMPLE_CAP) velSampleCount++;
+
+                if (velSampleCount == 1) {
+                    smoothedTargetVelocity = measured;
+                } else if (velSampleCount == 2) {
+                    int p1 = (velSampleIndex - 1 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                    int p2 = (velSampleIndex - 2 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                    smoothedTargetVelocity = velSamples[p1].scale(0.65).add(velSamples[p2].scale(0.35));
+                } else {
+                    int p1 = (velSampleIndex - 1 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                    int p2 = (velSampleIndex - 2 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                    int p3 = (velSampleIndex - 3 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                    smoothedTargetVelocity = velSamples[p1].scale(0.55)
+                            .add(velSamples[p2].scale(0.30))
+                            .add(velSamples[p3].scale(0.15));
+                }
+                lastMeasuredVelocity = measured;
+            }
+        } else {
+            resetTargetTracking();
+        }
+    }
+
+    private void processTargetLocking(Player player) {
+        boolean isKeyDown = ClientModEvents.LOCK_ON_KEY.isDown();
+        boolean isToggleMode = AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.TOGGLE;
+        boolean isHoldingBow = isRangedWeapon(player.getMainHandItem()) || isRangedWeapon(player.getOffhandItem());
+        boolean isHoldingWeapon = isHoldingBow ||
+                com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getMainHandItem()) ||
+                player.getMainHandItem().getItem() instanceof net.minecraft.world.item.SwordItem ||
+                player.getMainHandItem().getItem() instanceof net.minecraft.world.item.AxeItem ||
+                player.getMainHandItem().getItem() instanceof net.minecraft.world.item.TridentItem;
+
+        double searchRange = (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get())
+                ? Math.max(AutoAttackerConfig.AIM_ASSIST_RANGE.get(), AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get())
+                : AutoAttackerConfig.AIM_ASSIST_RANGE.get();
+
+        if (AutoAttackerConfig.ENABLE_AIM_ASSIST.get()) {
+            AutoAttackerConfig.AutoLockMode lockMode = AutoAttackerConfig.AUTO_LOCK_MODE.get();
+
+            // 2.1 手动快捷键交互 (按键锁定 / 手动解除锁定)
+            if (isKeyDown && !wasLockKeyDown) {
+                if (currentTarget != null) {
+                    currentTarget = null;
+                    autoLockHoverTarget = null;
+                    autoLockHoverTicks = 0;
+                    lastSwitchTime = System.currentTimeMillis() + 800L; // 手动脱锁赋予 800ms 静默期，避免瞬间重吸
+                } else {
+                    currentTarget = getPrioritizedTarget(player, searchRange, 60.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
+                }
+            } else if (!isToggleMode && !isKeyDown && lockMode == AutoAttackerConfig.AutoLockMode.OFF) {
+                // 长按模式下松开按键脱锁 (仅当自动索敌关闭时)
+                currentTarget = null;
+            }
+            wasLockKeyDown = isKeyDown;
+
+            // 2.2 自动索敌三种模式执行
+            if (currentTarget == null && System.currentTimeMillis() > lastSwitchTime) {
+                switch (lockMode) {
+                    case ALWAYS -> {
+                        // 模式 2: 始终自动锁定 (手持武器时生效，视角角度可调)
+                        if (isHoldingWeapon) {
+                            currentTarget = getPrioritizedTarget(player, searchRange, AutoAttackerConfig.AUTO_LOCK_FOV.get().floatValue(), AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
+                        }
+                        autoLockHoverTarget = null;
+                        autoLockHoverTicks = 0;
+                    }
+                    case HOVER -> {
+                        // 模式 1: 准星指向生物 N 秒时自动锁定
+                        LivingEntity pointing = getCrosshairPointingTarget(player, searchRange);
+                        if (pointing != null) {
+                            if (pointing == autoLockHoverTarget) {
+                                autoLockHoverTicks++;
+                                int reqTicks = (int) Math.round(AutoAttackerConfig.AUTO_LOCK_HOVER_TIME.get() * 20.0);
+                                if (reqTicks < 1) reqTicks = 1;
+                                if (autoLockHoverTicks >= reqTicks) {
+                                    currentTarget = pointing;
+                                    autoLockHoverTarget = null;
+                                    autoLockHoverTicks = 0;
+                                }
+                            } else {
+                                autoLockHoverTarget = pointing;
+                                autoLockHoverTicks = 1;
+                            }
+                        } else {
+                            autoLockHoverTarget = null;
+                            autoLockHoverTicks = 0;
+                        }
+                    }
+                    case OFF -> {
+                        // 模式 3: 关闭自动索敌
+                        autoLockHoverTarget = null;
+                        autoLockHoverTicks = 0;
+                    }
+                }
+            }
+
+            // 目标丢锁、死亡与自动切换目标 (Auto-Switch Target)
+            if (currentTarget != null) {
+                double maxLockDist = (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get())
+                        ? Math.max(64.0, AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get())
+                        : 64.0;
+                boolean isInvalid = !isValidTarget(player, currentTarget);
+                boolean isOutOfRange = currentTarget.level() != player.level() || currentTarget.distanceToSqr(player) > maxLockDist * maxLockDist;
+
+                if (isInvalid || isOutOfRange) {
+                    if (AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()) {
+                        // 目标死亡或超距，毫秒级无缝自动寻觅切换下一位最佳目标！
+                        currentTarget = getPrioritizedTarget(player, searchRange, 90.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), currentTarget);
+                        lostTargetGraceTicks = 0;
+                    } else {
+                        currentTarget = null;
+                        lostTargetGraceTicks = 0;
+                    }
+                } else if (!hasLineOfSightMultiPoint(player, currentTarget)) {
+                    lostTargetGraceTicks++;
+                    if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
+                        if (AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()) {
+                            // 目标长时间隐蔽入掩体，自动转火视野内其他暴露目标
+                            currentTarget = getPrioritizedTarget(player, searchRange, 90.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), currentTarget);
+                            lostTargetGraceTicks = 0;
+                        } else {
+                            currentTarget = null;
+                            lostTargetGraceTicks = 0;
+                        }
+                    }
+                } else {
+                    lostTargetGraceTicks = 0;
+                }
+            }
+        } else {
+            currentTarget = null;
+        }
+
+        staticCurrentTarget = currentTarget;
+    }
+
+    private void processFirearmLogic(Player player) {
+        ItemStack mainHand = player.getMainHandItem();
+        boolean isHoldingGun = com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(mainHand);
+        if (isHoldingGun) {
+            com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus gunStatus =
+                com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(mainHand);
+
+            // 智能自动换弹：当枪膛与弹匣彻底打空 (totalAmmo == 0) 时触发
+            if (AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD.get() && gunStatus.totalAmmo == 0 &&
+                !com.xdyyj.autoattacker.weapon.FirearmAdapter.isReloading(player) &&
+                !com.xdyyj.autoattacker.weapon.FirearmAdapter.isBolting(player)) {
+
+                // 关键修复：一旦打空子弹，立即松开扳机与攻击键！
+                // 枪械模组 (TACZ / Point Blank / JEG 等) 在处于射击按键按下状态时会拦截或拒绝换弹请求
+                if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
+                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+                    gunSemiFireTimer = 0;
+                }
+
+                long now = System.currentTimeMillis();
+                if (!ItemStack.isSameItemSameTags(mainHand, lastAutoReloadItem)) {
+                    lastAutoReloadItem = mainHand.copy();
+                    lastAutoReloadTriggerTime = 0L;
+                    autoReloadRetryCount = 0;
+                    autoReloadLockout = false;
+                }
+
+                if (!autoReloadLockout) {
+                    // 关键核心防失败机制：根据枪械 RPM 动态计算射击冷却缓冲时间，确保服务端 shootCoolDown 彻底清零
+                    // 射击间隔 ms = 60000 / RPM (如 600 RPM -> 100ms)，加上 150ms 掉包/网络 tick 缓冲，最少 200ms
+                    int rpm = (gunStatus.rpm > 0) ? gunStatus.rpm : 600;
+                    long requiredBufferMs = Math.max(200L, (60000L / rpm) + 150L);
+
+                    if (now - lastGunShootTime >= requiredBufferMs) {
+                        // 检测背包是否真正有备用子弹 (含 TACZ 弹药箱 / 创造模式)
+                        boolean hasAmmo = com.xdyyj.autoattacker.weapon.FirearmAdapter.hasInventoryAmmo(player, mainHand);
+                        if (hasAmmo) {
+                            // 换弹防重保护：重试防抖间隔 1200ms，杜绝高频重复触发
+                            if (now - lastAutoReloadTriggerTime > 1200L) {
+                                if (autoReloadRetryCount >= MAX_RELOAD_RETRIES) {
+                                    autoReloadLockout = true;
+                                } else {
+                                    lastAutoReloadTriggerTime = now;
+                                    autoReloadRetryCount++;
+                                    com.xdyyj.autoattacker.weapon.FirearmAdapter.triggerReload(player);
+                                }
+                            }
+                        } else {
+                            autoReloadLockout = true;
+                        }
+                    }
+                }
+                // 若处于锁止或无备弹，绝不重复发送换弹发包，彻底消除死循环
+            } else if (gunStatus.totalAmmo > 0) {
+                // 枪内有子弹时重置触发标记与锁止，确保打空当瞬能第一时间就绪换弹
+                lastAutoReloadTriggerTime = 0L;
+                autoReloadRetryCount = 0;
+                autoReloadLockout = false;
+            }
+
+            if (AutoAttackerConfig.ENABLE_GUN_TRIGGERBOT.get() && currentTarget != null && currentTarget.isAlive() && hasLineOfSightMultiPoint(player, currentTarget)) {
+                // 特殊机制：逐发装填左轮/霰弹枪 (如 Scorched Guns 逐发填装) 遭遇目标打断换弹
+                // 当枪内已有至少 1 发子弹，且正在逐发装填、眼前有锁定的有效敌人时，立即紧急打断装填就绪击发！
+                if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isManualReloading(player, mainHand) && gunStatus.totalAmmo >= 1) {
+                    com.xdyyj.autoattacker.weapon.FirearmAdapter.interruptReload(player);
+                }
+
+                // 修正：使用 totalAmmo (含枪膛上膛子弹)，彻底解决打空弹匣后总残留 1 发上膛子弹不击发的问题
+                boolean canShoot = (gunStatus.totalAmmo > 0 || gunStatus.totalAmmo == -1) &&
+                                   !player.getCooldowns().isOnCooldown(mainHand.getItem()) &&
+                                   !com.xdyyj.autoattacker.weapon.FirearmAdapter.isReloading(player) &&
+                                   !com.xdyyj.autoattacker.weapon.FirearmAdapter.isBolting(player);
+
+                if (canShoot) {
+                    float currentYaw = player.getYRot();
+                    float currentPitch = player.getXRot();
+                    float targetAimYaw = (staticLastPredictedAim != null) ? staticLastPredictedAim.targetYaw : staticLastPredictedYaw;
+                    float targetAimPitch = (staticLastPredictedAim != null) ? staticLastPredictedAim.targetPitch : currentPitch;
+                    float yawDiff = Math.abs(Mth.wrapDegrees(targetAimYaw - currentYaw));
+                    float pitchDiff = Math.abs(targetAimPitch - currentPitch);
+
+                    // 远距离 (如 68m) 射击时准星容差自适应微缩，提升远距点杀与爆头精度
+                    double targetDist = player.distanceTo(currentTarget);
+                    float maxDiff = (targetDist > 35.0) ? 9.0f : 14.0f;
+
+                    if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isReleaseFire(gunStatus)) {
+                        // 蓄力释放型武器 (如 JEG 复合弓/原始弓 RELEASE_FIRE):
+                        // 机制：严格拉满弓 (20 ticks / 1秒)，满蓄力后当准星就位瞬间松开左键释放箭矢！
+                        gunSemiFireTimer = 0;
+                        if (gunReleaseCoolTicks > 0) {
+                            gunReleaseCoolTicks--;
+                            com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+                        } else {
+                            int currentHold = com.xdyyj.autoattacker.weapon.FirearmAdapter.getJegHoldFire();
+                            int maxHold = com.xdyyj.autoattacker.weapon.FirearmAdapter.getMaxHoldFire(mainHand);
+                            float progress = com.xdyyj.autoattacker.weapon.FirearmAdapter.getChargeProgress(player, mainHand);
+                            int requiredHold = (maxHold > 0) ? maxHold : 20;
+
+                            // 严格判断是否真正完全拉满弓：
+                            // 1. JEG 客户端 ShootingHandler.get().getHoldFire() 达到上限 (通常为 20)
+                            // 2. 或 ChargeTracker 满蓄力 (1.0f)
+                            // 3. 或连续按住拉弦达到 requiredHold + 4 刻保底 (杜绝未满拉弓提前释放)
+                            boolean isFullyDrawn = (currentHold >= requiredHold && currentHold > 0) ||
+                                                   progress >= 0.99f ||
+                                                   (gunReleaseChargeTicks >= requiredHold + 4);
+
+                            if (!isFullyDrawn) {
+                                // 阶段 1：蓄力拉弦阶段。坚决按住左键蓄力，绝不可因准星微小偏移松手！
+                                gunReleaseChargeTicks++;
+                                com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
+                            } else {
+                                // 阶段 2：弓弦已 100% 彻底拉满！进入瞄准就绪释放判定
+                                if (yawDiff <= maxDiff && pitchDiff <= maxDiff) {
+                                    // 准星锁定在目标容差内，瞬间松开左键，满威力击发出箭！
+                                    lastGunShootTime = System.currentTimeMillis();
+                                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+                                    gunReleaseChargeTicks = 0;
+                                    gunReleaseCoolTicks = 3; // 留 3 ticks 缓冲确保射击与动画结算
+                                } else {
+                                    // 准星尚未对齐，继续稳稳拉满弓不放，等待自瞄对齐瞬间！
+                                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
+                                }
+                            }
+                        }
+                    } else {
+                        // 普通全自动 / 半自动枪械
+                        gunReleaseChargeTicks = 0;
+                        gunReleaseCoolTicks = 0;
+                        if (yawDiff <= maxDiff && pitchDiff <= maxDiff) {
+                            lastGunShootTime = System.currentTimeMillis();
+                            if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isSemiAuto(gunStatus)) {
+                                // 半自动武器 (如 Glock, 沙漠之鹰, SPR-15 DMR, 单发步枪/狙击枪):
+                                // 必须交替扣动与松开扳机 (Tap-Fire) 触发 TACZ 击发并完成扳机重置 (Reset)
+                                int cycleTicks = Math.max(2, Math.round(1200.0f / Math.max(gunStatus.rpm, 120)));
+                                gunSemiFireTimer++;
+                                if (gunSemiFireTimer >= cycleTicks) {
+                                    gunSemiFireTimer = 0;
+                                }
+                                if (gunSemiFireTimer == 0) {
+                                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
+                                } else {
+                                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+                                }
+                            } else {
+                                // 全自动武器 (如 HK416, AUG, M4A1): 持续压住扳机扫射
+                                gunSemiFireTimer = 0;
+                                com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
+                            }
+                        } else {
+                            gunSemiFireTimer = 999;
+                            com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+                        }
+                    }
+                } else {
+                    gunSemiFireTimer = 999;
+                    gunReleaseChargeTicks = 0;
+                    gunReleaseCoolTicks = 0;
+                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+                }
+            } else {
+                gunSemiFireTimer = 999;
+                gunReleaseChargeTicks = 0;
+                gunReleaseCoolTicks = 0;
+                if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
+                    com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+                }
+            }
+        } else {
+            gunSemiFireTimer = 999;
+            gunReleaseChargeTicks = 0;
+            gunReleaseCoolTicks = 0;
+            if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
+                com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+            }
+        }
+    }
+
+    private void processAutoBowShooting(Minecraft mc, Player player, MultiPlayerGameMode gameMode) {
+        if (!AutoAttackerConfig.ENABLE_AUTO_SHOOT.get() || !mc.options.keyUse.isDown() || !player.isUsingItem()) {
+            return;
+        }
+        ItemStack itemInUse = player.getUseItem();
+        if (isInSet(itemInUse, AutoAttackerConfig.blacklistItems, AutoAttackerConfig.blacklistTags)) {
+            return;
+        }
+        if (!isBow(itemInUse)) {
+            return;
+        }
+
+        HitResult hitResult = mc.hitResult;
+        if (hitResult != null && hitResult.getType() == HitResult.Type.ENTITY) {
+            Entity target = ((EntityHitResult) hitResult).getEntity();
+            if (AutoAttackerConfig.excludedEntities.contains(target.getType())) {
+                return;
+            }
+        }
+
+        boolean isFullyCharged = AutoBallisticsTracker.isBowFullyCharged(player, itemInUse);
+
+        if (isFullyCharged) {
+            InteractionHand hand = player.getUsedItemHand();
+
+            if (currentTarget != null && currentTarget.isAlive()) {
+                AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(itemInUse);
+                Vec3 eye = player.getEyePosition();
+                double targetDistXZ = Math.hypot(currentTarget.getX() - eye.x, currentTarget.getZ() - eye.z);
+                double targetY = computeTargetY(currentTarget, 1.0f, AutoAttackerConfig.TARGET_PART.get(), false, true, targetDistXZ);
+                Vec3 baseAimPoint = new Vec3(currentTarget.getX(), targetY, currentTarget.getZ());
+
+                float sendYaw = player.getYRot();
+                float sendPitch = player.getXRot();
+
+                if (profile.isHoming) {
+                    double dX = currentTarget.getX() - eye.x;
+                    double dY = targetY - eye.y;
+                    double dZ = currentTarget.getZ() - eye.z;
+                    double horizDist = Math.sqrt(dX * dX + dZ * dZ);
+                    sendYaw = (float) (Mth.atan2(dZ, dX) * (180D / Math.PI)) - 90.0F;
+                    sendPitch = (float) -(Mth.atan2(dY, horizDist) * (180D / Math.PI));
+                } else {
+                    PredictedAim predicted = computePredictedAim(player, currentTarget, profile.speed, profile.gravity, eye, baseAimPoint);
+                    if (predicted != null) {
+                        sendYaw = predicted.targetYaw;
+                        sendPitch = predicted.targetPitch;
+                    }
+                }
+
+                if (mc.getConnection() != null) {
+                    mc.getConnection().send(new ServerboundMovePlayerPacket.Rot(sendYaw, sendPitch, player.onGround()));
+                }
+            }
+
+            gameMode.releaseUsingItem(player);
+
+            boolean isUseKeyPhysicallyDown = com.mojang.blaze3d.platform.InputConstants.isKeyDown(
+                    mc.getWindow().getWindow(), mc.options.keyUse.getKey().getValue());
+            if (isUseKeyPhysicallyDown) {
+                gameMode.useItem(player, hand);
+            }
+        }
     }
 }
