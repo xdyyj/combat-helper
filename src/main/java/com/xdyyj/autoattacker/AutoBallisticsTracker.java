@@ -665,6 +665,8 @@ public final class AutoBallisticsTracker {
         int lastBx = Integer.MIN_VALUE, lastBy = Integer.MIN_VALUE, lastBz = Integer.MIN_VALUE;
         boolean lastIsWater = false;
 
+        BlockPos.MutableBlockPos mutPos = new BlockPos.MutableBlockPos();
+
         for (int step = 0; step < maxSteps; step++) {
             double nextX = x + vHoriz;
             double nextY = y + vy;
@@ -681,7 +683,7 @@ public final class AutoBallisticsTracker {
             y = nextY;
 
             double stepDrag = drag;
-            if (level != null) {
+            if (level != null && eye != null) {
                 double wx = eye.x + x * dirX;
                 double wy = eye.y + y;
                 double wz = eye.z + x * dirZ;
@@ -695,8 +697,8 @@ public final class AutoBallisticsTracker {
                     lastBx = bx;
                     lastBy = by;
                     lastBz = bz;
-                    BlockPos pos = new BlockPos(bx, by, bz);
-                    lastIsWater = level.isWaterAt(pos);
+                    mutPos.set(bx, by, bz);
+                    lastIsWater = level.isWaterAt(mutPos);
                     if (lastIsWater) stepDrag = 0.60;
                 }
             }

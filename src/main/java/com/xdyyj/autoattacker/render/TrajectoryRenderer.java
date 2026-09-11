@@ -697,6 +697,7 @@ public final class TrajectoryRenderer {
 
         int lastBx = Integer.MIN_VALUE, lastBy = Integer.MIN_VALUE, lastBz = Integer.MIN_VALUE;
         boolean lastIsWater = false;
+        BlockPos.MutableBlockPos mutPos = new BlockPos.MutableBlockPos();
 
         for (int step = 0; step < MAX_STEPS && traveled < maxLength; step++) {
             Vec3 proposed = position.add(velocity.scale(SUBSTEP));
@@ -732,8 +733,8 @@ public final class TrajectoryRenderer {
                     lastBx = bx;
                     lastBy = by;
                     lastBz = bz;
-                    BlockPos pos = new BlockPos(bx, by, bz);
-                    lastIsWater = mc.level.isWaterAt(pos);
+                    mutPos.set(bx, by, bz);
+                    lastIsWater = mc.level.isWaterAt(mutPos);
                     if (lastIsWater) currentDrag = 0.60D;
                 }
             }
