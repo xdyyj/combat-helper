@@ -896,15 +896,17 @@ public class ClientEvents {
                 }
             } else {
                 // 如果距离稍远，角度在极小容差内且在视线内也算作指向
-                Vec3 toTarget = entity.getBoundingBox().getCenter().subtract(eyePos);
-                double length = toTarget.length();
+                double dX = entity.getX() - eyePos.x;
+                double dY = (entity.getY() + entity.getBbHeight() * 0.5D) - eyePos.y;
+                double dZ = entity.getZ() - eyePos.z;
+                double length = Math.sqrt(dX * dX + dY * dY + dZ * dZ);
                 if (length > 0.001D && length <= range) {
-                    double dot = toTarget.scale(1.0D / length).dot(lookVec);
+                    double dot = (dX * lookVec.x + dY * lookVec.y + dZ * lookVec.z) / length;
                     double angle = Math.acos(Mth.clamp(dot, -1.0, 1.0)) * (180.0 / Math.PI);
                     // 视线张角：距离越远允许的容差越紧致
                     double allowedAngle = Math.max(1.8, Math.min(4.5, 20.0 / length));
                     if (angle <= allowedAngle && hasLineOfSightMultiPoint(player, entity)) {
-                        double distSqr = eyePos.distanceToSqr(entity.position());
+                        double distSqr = player.distanceToSqr(entity);
                         if (distSqr < bestDistSqr) {
                             bestDistSqr = distSqr;
                             bestEntity = entity;
@@ -936,11 +938,13 @@ public class ClientEvents {
             double distSqr = player.distanceToSqr(entity);
             if (distSqr > rangeSqr) continue;
 
-            Vec3 toTarget = entity.getBoundingBox().getCenter().subtract(eyePos);
-            double length = toTarget.length();
+            double dX = entity.getX() - eyePos.x;
+            double dY = (entity.getY() + entity.getBbHeight() * 0.5D) - eyePos.y;
+            double dZ = entity.getZ() - eyePos.z;
+            double length = Math.sqrt(dX * dX + dY * dY + dZ * dZ);
             if (length <= 0.0001D) continue;
 
-            double alignment = toTarget.scale(1.0D / length).dot(lookVec);
+            double alignment = (dX * lookVec.x + dY * lookVec.y + dZ * lookVec.z) / length;
             double angle = Math.acos(Mth.clamp(alignment, -1.0, 1.0)) * (180.0 / Math.PI);
             if (angle > maxAngle) continue;
 
@@ -985,11 +989,13 @@ public class ClientEvents {
             double distSqr = player.distanceToSqr(entity);
             if (distSqr > rangeSqr) continue;
 
-            Vec3 toTarget = entity.getBoundingBox().getCenter().subtract(eyePos);
-            double length = toTarget.length();
+            double dX = entity.getX() - eyePos.x;
+            double dY = (entity.getY() + entity.getBbHeight() * 0.5D) - eyePos.y;
+            double dZ = entity.getZ() - eyePos.z;
+            double length = Math.sqrt(dX * dX + dY * dY + dZ * dZ);
             if (length <= 0.0001D) continue;
 
-            double alignment = toTarget.scale(1.0D / length).dot(lookVec);
+            double alignment = (dX * lookVec.x + dY * lookVec.y + dZ * lookVec.z) / length;
             double angle = Math.acos(Mth.clamp(alignment, -1.0, 1.0)) * (180.0 / Math.PI);
             if (angle > maxAngle) continue;
 
@@ -1263,6 +1269,20 @@ public class ClientEvents {
     public static void performAttack(Minecraft mc, Player player) {
         var gameMode = mc.gameMode;
         if (gameMode == null) return;
+
+        LivingEntity locked = getCurrentTarget();
+        if (locked != null && locked.isAlive() && !locked.isRemoved() && !AutoAttackerConfig.excludedEntities.contains(locked.getType())) {
+            double reach = 4.5D;
+            if (player.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get()) != null) {
+                reach = player.getAttributeValue(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get());
+            }
+            if (player.distanceToSqr(locked) <= reach * reach) {
+                gameMode.attack(player, locked);
+                player.swing(InteractionHand.MAIN_HAND);
+                return;
+            }
+        }
+
         HitResult hitResult = mc.hitResult;
         if (hitResult != null && hitResult.getType() == HitResult.Type.ENTITY) {
             Entity target = ((EntityHitResult) hitResult).getEntity();
@@ -1285,11 +1305,11 @@ public class ClientEvents {
         ItemStack stack = player.getMainHandItem();
         if (stack.isEmpty()) return false;
         
-        if (ItemStack.isSameItemSameTags(lastCheckedItem, stack)) {
+        if (lastCheckedItem != null && ItemStack.isSameItemSameTags(lastCheckedItem, stack)) {
             return isLastItemWeapon;
         }
 
-        lastCheckedItem = stack.copy();
+        lastCheckedItem = stack;
         isLastItemWeapon = checkIsWeapon(stack);
         return isLastItemWeapon;
     }

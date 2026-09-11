@@ -27,13 +27,33 @@ public abstract class MinecraftMixin {
         if (this.player == null) return;
 
         if (AutoAttackerConfig.ENABLE_AUTO_ATTACK.get() && ClientEvents.isHoldingWeapon(this.player)) {
-            // Drain the vanilla attack key clicks so vanilla doesn't attack
+            // Check if player is attempting to mine a block (looking at a block with no entity target in melee reach)
+            boolean isLookingAtBlock = mc.hitResult != null && mc.hitResult.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK;
+            LivingEntity locked = ClientEvents.getCurrentTarget();
+            boolean hasLockedTargetInReach = false;
+            if (locked != null && locked.isAlive() && !locked.isRemoved()) {
+                double reach = 4.5D;
+                if (this.player.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get()) != null) {
+                    reach = this.player.getAttributeValue(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get());
+                }
+                if (this.player.distanceToSqr(locked) <= reach * reach) {
+                    hasLockedTargetInReach = true;
+                }
+            }
+
+            // If pointing at a block and no entity target is in melee reach, preserve vanilla block breaking
+            if (isLookingAtBlock && !hasLockedTargetInReach) {
+                return;
+            }
+
+            // Drain the vanilla attack key clicks so vanilla doesn't duplicate attack/swing
             while (this.options.keyAttack.consumeClick()) {
                 // Do nothing
             }
 
             if (this.options.keyAttack.isDown()) {
-                if (this.player.getAttackStrengthScale(0.0F) >= 1.0F) {
+                // Use 0.5F adjustTicks to align with vanilla server/client attack strength scale calculations
+                if (this.player.getAttackStrengthScale(0.5F) >= 1.0F) {
                     ClientEvents.performAttack(mc, this.player);
                 }
             }
