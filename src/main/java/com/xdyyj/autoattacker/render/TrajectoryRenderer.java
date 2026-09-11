@@ -367,15 +367,15 @@ public final class TrajectoryRenderer {
         if (physicalPoints.size() < 2) return physicalPoints;
 
         boolean isFirstPerson = mc.options.getCameraType().isFirstPerson();
-        Vec3 forward = Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize();
+        Vec3 playerForward = player.getViewVector(partialTick).normalize();
         Vec3 worldUp = new Vec3(0.0D, 1.0D, 0.0D);
-        Vec3 right = forward.cross(worldUp);
-        if (right.lengthSqr() < 1.0E-6D) {
-            right = new Vec3(1.0D, 0.0D, 0.0D);
+        Vec3 playerRight = playerForward.cross(worldUp);
+        if (playerRight.lengthSqr() < 1.0E-6D) {
+            playerRight = new Vec3(1.0D, 0.0D, 0.0D);
         } else {
-            right = right.normalize();
+            playerRight = playerRight.normalize();
         }
-        Vec3 up = right.cross(forward).normalize();
+        Vec3 playerUp = playerRight.cross(playerForward).normalize();
 
         boolean isRightHanded = (player.getMainArm() == net.minecraft.world.entity.HumanoidArm.RIGHT);
         boolean usingOffhand = (player.getOffhandItem() == weaponStack);
@@ -387,15 +387,15 @@ public final class TrajectoryRenderer {
         if (isFirstPerson) {
             // 第一人称：手部武器模型位于右下侧 (或左手在左下侧)，自然前伸，精致不遮挡视线
             visualOrigin = eyePos
-                    .add(right.scale(sideSign * 0.26D))
-                    .add(up.scale(-0.18D))
-                    .add(forward.scale(0.32D));
+                    .add(playerRight.scale(sideSign * 0.26D))
+                    .add(playerUp.scale(-0.18D))
+                    .add(playerForward.scale(0.32D));
         } else {
-            // 第三人称：位于玩家角色持武器手臂外侧
+            // 第三人称（含 Shoulder Surfing 越肩视角）：根据玩家真实持武器手臂偏置精准计算枪口/持弓手起点
             visualOrigin = eyePos
-                    .add(right.scale(sideSign * 0.36D))
-                    .add(up.scale(-0.24D))
-                    .add(forward.scale(0.15D));
+                    .add(playerRight.scale(sideSign * 0.38D))
+                    .add(playerUp.scale(-0.22D))
+                    .add(playerForward.scale(0.20D));
         }
 
         Vec3 physStart = physicalPoints.get(0);
@@ -418,9 +418,11 @@ public final class TrajectoryRenderer {
                 // 已完全收敛到真实物理弹道轨迹
                 visualPoints.add(curPhys);
             } else {
-                // 三次平滑缓出 (Cubic Ease-out)：起点平缓升起，自然顺畅汇入飞行弹道
-                double u = accumulatedDist / convergeDistance;
-                double factor = (1.0D - u) * (1.0D - u) * (1.0D - u);
+                // Hermite / Smoothstep 零切角连续收敛 (C1/C2 Continuity):
+                // f(u) = (1 - u)^2 * (1 + 2u)，满足 f(0)=1, f'(0)=0, f(1)=0, f'(1)=0
+                // 在起点 (u=0) 处导数为 0，确保轨迹以 100% 完美的枪口朝向平行延伸，彻底消除近距离折角与畸变
+                double u = Mth.clamp(accumulatedDist / convergeDistance, 0.0D, 1.0D);
+                double factor = (1.0D - u) * (1.0D - u) * (1.0D + 2.0D * u);
                 Vec3 offset = handOffset.scale(factor);
                 visualPoints.add(curPhys.add(offset));
             }

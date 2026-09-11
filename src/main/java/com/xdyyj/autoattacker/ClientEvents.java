@@ -679,6 +679,7 @@ public class ClientEvents {
     }
 
     private void applyAimAssist(Player player, LivingEntity target, float partialTick, float deltaSec) {
+        Minecraft mc = Minecraft.getInstance();
         // --- 鼠标死区与目标切换机制 (Mouse Deadzone & Switch Logic) ---
         float curYaw = player.getYRot();
         float curPitch = player.getXRot();
@@ -819,11 +820,18 @@ public class ClientEvents {
         // 当角色自身移动 (例如按 D 往右走位) 时，目标相对玩家视线必然向左转动。
         // 立即前馈补偿该角位移，驱动镜头自动向左拉拽，消除走位滞后，使准星绝对咬死在目标身上！
         // ==========================================
+        boolean isThirdPerson = !mc.options.getCameraType().isFirstPerson();
+
         float kinematicYaw = 0.0f;
         float kinematicPitch = 0.0f;
         if (wasLockedLastFrame && lastTrackedTarget == target && !Float.isNaN(lastDestYaw) && !Float.isNaN(lastDestPitch)) {
             kinematicYaw = Mth.wrapDegrees(destYaw - lastDestYaw);
             kinematicPitch = destPitch - lastDestPitch;
+            if (isThirdPerson) {
+                // 第三人称视角优化：适当平抑前馈刚度，避免角色横移带动摄像机轨道旋转半径过大引起的剧烈抖动
+                kinematicYaw *= 0.65f;
+                kinematicPitch *= 0.65f;
+            }
         }
         lastTrackedTarget = target;
         lastDestYaw = destYaw;
@@ -844,8 +852,16 @@ public class ClientEvents {
             baseFactor = Math.max(baseFactor, 0.40f);
         }
 
+        // 第三人称近距离 (2~5m) 视距自适应平滑：防止越肩视角下近距离大视角急拉造成的画面晃动与晕动感
+        if (isThirdPerson) {
+            double dist = player.distanceTo(target);
+            if (dist < 6.0) {
+                float distDampen = (float) Mth.clamp(dist / 6.0, 0.60, 1.0);
+                baseFactor *= distDampen;
+            }
+        }
+
         // 枪械后坐力抑制 (平滑连续阻尼 Anti-Recoil，消除高频抖动) 与机瞄感知 (ADS Sensing)
-        Minecraft mc = Minecraft.getInstance();
         boolean isRelease = isGun && com.xdyyj.autoattacker.weapon.FirearmAdapter.isReleaseFire(com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(player.getMainHandItem()));
         if (mc.options.keyAttack.isDown() && !isRelease) {
             lastGunShootTime = System.currentTimeMillis();
@@ -907,6 +923,13 @@ public class ClientEvents {
         float stepY = kinematicYaw + dampedDeltaY * alphaY;
         float stepX = kinematicPitch + dampedDeltaX * alphaX;
 
+        if (isThirdPerson) {
+            // 第三人称视角下限制单帧最大角步进，彻底规避急转造成的画面剧烈遮挡与失重晕动感
+            float maxStep = (float) (24.0 * (deltaSec * 60.0));
+            stepY = Mth.clamp(stepY, -maxStep, maxStep);
+            stepX = Mth.clamp(stepX, -maxStep, maxStep);
+        }
+
         float newYaw = player.getYRot() + stepY;
         float newPitch = Mth.clamp(player.getXRot() + stepX, -89.5F, 89.5F);
 
@@ -931,8 +954,14 @@ public class ClientEvents {
      * 判定玩家准星是否正在指向特定实体 (线段与 Hitbox 相交判定，或极小角度对齐)
      */
     private LivingEntity getCrosshairPointingTarget(Player player, double range) {
-        Vec3 eyePos = player.getEyePosition();
-        Vec3 lookVec = player.getViewVector(1.0F);
+        Minecraft mc = Minecraft.getInstance();
+        boolean isThirdPerson = !mc.options.getCameraType().isFirstPerson();
+        net.minecraft.client.Camera camera = mc.gameRenderer.getMainCamera();
+
+        Vec3 eyePos = (isThirdPerson && camera != null) ? camera.getPosition() : player.getEyePosition();
+        Vec3 lookVec = (isThirdPerson && camera != null)
+                ? Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize()
+                : player.getViewVector(1.0F);
         Vec3 endPos = eyePos.add(lookVec.scale(range));
         AABB searchBox = player.getBoundingBox().inflate(range);
 
@@ -981,8 +1010,14 @@ public class ClientEvents {
      */
     private LivingEntity getPrioritizedTarget(Player player, double range, float maxAngle,
                                               AutoAttackerConfig.SwitchPriority priority, LivingEntity excludeTarget) {
-        Vec3 eyePos = player.getEyePosition();
-        Vec3 lookVec = player.getViewVector(1.0F);
+        Minecraft mc = Minecraft.getInstance();
+        boolean isThirdPerson = !mc.options.getCameraType().isFirstPerson();
+        net.minecraft.client.Camera camera = mc.gameRenderer.getMainCamera();
+
+        Vec3 eyePos = (isThirdPerson && camera != null) ? camera.getPosition() : player.getEyePosition();
+        Vec3 lookVec = (isThirdPerson && camera != null)
+                ? Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize()
+                : player.getViewVector(1.0F);
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
@@ -1032,8 +1067,14 @@ public class ClientEvents {
     }
 
     private LivingEntity findSwitchTarget(Player player, LivingEntity excludeTarget, double range, float maxAngle) {
-        Vec3 eyePos = player.getEyePosition();
-        Vec3 lookVec = player.getViewVector(1.0F);
+        Minecraft mc = Minecraft.getInstance();
+        boolean isThirdPerson = !mc.options.getCameraType().isFirstPerson();
+        net.minecraft.client.Camera camera = mc.gameRenderer.getMainCamera();
+
+        Vec3 eyePos = (isThirdPerson && camera != null) ? camera.getPosition() : player.getEyePosition();
+        Vec3 lookVec = (isThirdPerson && camera != null)
+                ? Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize()
+                : player.getViewVector(1.0F);
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
