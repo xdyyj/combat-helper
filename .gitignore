@@ -24,6 +24,7 @@ build/
 # Runtime test directories
 run/
 run-data/
+logs/
 
 # Temporary / Scratch files
 scratch/
