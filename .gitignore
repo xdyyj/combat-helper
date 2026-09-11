@@ -1,0 +1,40 @@
+﻿# Eclipse
+bin/
+*.launch
+.settings/
+.metadata/
+.classpath
+.project
+.eclipse/
+
+# IDEA
+.idea/
+*.ipr
+*.iws
+*.iml
+out/
+
+# VS Code
+.vscode/
+
+# Gradle & Build
+build/
+.gradle/
+
+# Runtime test directories
+run/
+run-data/
+
+# Temporary / Scratch files
+scratch/
+tmp_test/
+old_mod_backup/
+reference-lib/
+*.log
+
+# OS generated
+.DS_Store
+Thumbs.db
+
+# Files from Forge MDK
+forge*changelog.txt

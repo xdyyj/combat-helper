@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.xdyyj.autoattacker.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "autoattacker.refmap.json",
+  "mixins": [
+  ],
+  "client": [
+    "MinecraftMixin",
+    "ItemPropertiesMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
