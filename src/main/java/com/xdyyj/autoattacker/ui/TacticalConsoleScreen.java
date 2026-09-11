@@ -131,773 +131,33 @@ public class TacticalConsoleScreen extends Screen {
     private void rebuildCurrentTab() {
         currentItems.clear();
         try {
-        int drawerW = getDrawerWidth();
-        int w = drawerW - 20;
-        int x = 10;
-        int contentTop = 58;
+            int drawerW = getDrawerWidth();
+            int w = drawerW - 20;
+            int x = 10;
+            int contentTop = 58;
 
-        if (currentTab == 0) {
-            // =================================================================
-            // Tab 0: 锁定 (根据手持武器4态智能自适应)
-            // =================================================================
-            Minecraft mc = Minecraft.getInstance();
-            Player player = mc.player;
-            ItemStack held = ClientEvents.getActiveWeapon(player);
-            ClientEvents.WeaponCategory category = ClientEvents.getWeaponCategory(held);
-
-            // 顶部手持状态大卡片
-            currentItems.add(new WeaponBannerCard(held, category));
-
-            currentItems.add(new HeaderItem("// 核心总控"));
-
-            currentItems.add(new ToggleItem("模组总开关",
-                    AutoAttackerConfig.ENABLE_MOD::get,
-                    val -> {
-                        AutoAttackerConfig.ENABLE_MOD.set(val);
-                        showToast("模组: " + (val ? "已启用" : "已禁用"));
-                    },
-                    makeTooltip("模组总开关",
-                            "Auto Attacker 战术核心总控制开关。",
-                            "关闭后将立即休眠所有自动化功能，包括自动近战挥击、自动拉弓射箭、自瞄吸附与提前量预判。")));
-
-            currentItems.add(new ToggleItem("自动近战挥击",
-                    AutoAttackerConfig.ENABLE_AUTO_ATTACK::get,
-                    val -> {
-                        AutoAttackerConfig.ENABLE_AUTO_ATTACK.set(val);
-                        showToast("自动近战: " + (val ? "开启" : "关闭"));
-                    },
-                    makeTooltip("自动近战挥击",
-                            "智能武器 CD 满蓄力精准同步挥砍。",
-                            "按住攻击键（左键）时，系统自动在武器蓄力冷却（Attack Indicator）达到 100% 满额时出刀。",
-                            "确保每一击发挥最大基础伤害与横扫暴击，彻底杜绝过快乱击导致的伤害严重折减。")));
-
-            if (category == ClientEvents.WeaponCategory.BOW || category == ClientEvents.WeaponCategory.OTHER) {
-                currentItems.add(new ToggleItem("满蓄力自动放箭",
-                        AutoAttackerConfig.ENABLE_AUTO_SHOOT::get,
-                        val -> {
-                            AutoAttackerConfig.ENABLE_AUTO_SHOOT.set(val);
-                            showToast("自动放箭: " + (val ? "开启" : "关闭"));
-                        },
-                        makeTooltip("满蓄力自动放箭",
-                                "远程弓弩满蓄力即刻自动释放。",
-                                "手持弓弩按住使用键（右键）蓄力时，一旦武器拉至 100% 最大初速蓄力点，立即自动放箭。",
-                                "自动适配神话 (Apotheosis) 蓄力速度宝石与植物学弓，杜绝早泄下坠或过度拉满浪费后摇。")));
+            switch (currentTab) {
+                case 0 -> buildLockTab();
+                case 1 -> buildTrajectoryTab();
+                case 2 -> buildArchiveTab();
+                case 3 -> buildListTab();
+                default -> {}
             }
 
-            currentItems.add(new HeaderItem("// 瞄准吸附"));
-
-            currentItems.add(new ToggleItem("自瞄吸附",
-                    AutoAttackerConfig.ENABLE_AIM_ASSIST::get,
-                    val -> {
-                        AutoAttackerConfig.ENABLE_AIM_ASSIST.set(val);
-                        showToast("自瞄吸附: " + (val ? "开启" : "关闭"));
-                    },
-                    makeTooltip("自瞄吸附",
-                            "平滑磁力视角锁定系统。",
-                            "按下锁定快捷键（默认 R 键）时，准星视角将自动吸附并持续咬住射程内最近的目标。")));
-
-            currentItems.add(new CycleItem("瞄准模式",
-                    () -> AutoAttackerConfig.AIM_LOCK_TYPE.get().getDisplayName(),
-                    () -> {
-                        AutoAttackerConfig.AimLockType next = AutoAttackerConfig.AIM_LOCK_TYPE.get() == AutoAttackerConfig.AimLockType.SMOOTH ?
-                                AutoAttackerConfig.AimLockType.HARD : AutoAttackerConfig.AimLockType.SMOOTH;
-                        AutoAttackerConfig.AIM_LOCK_TYPE.set(next);
-                        showToast("瞄准模式: " + next.getDisplayName());
-                    },
-                    makeTooltip("强锁与平滑模式切换",
-                            "控制自瞄锁死强度与转向机制。",
-                            "【平滑自瞄】：采用物理插值渐进跟枪，动作平滑拟真，适合日常体验；",
-                            "【极速强锁】：0 帧瞬间咬死目标与落点，免疫反向鼠标阻力与强后坐力，绝对死锁！")));
-
-            currentItems.add(new ToggleItem("自动切换目标",
-                    AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET::get,
-                    val -> {
-                        AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.set(val);
-                        showToast("自动切靶: " + (val ? "开启" : "关闭"));
-                    },
-                    makeTooltip("自动切换目标 (Switch on Kill)",
-                            "当前锁定目标死亡、脱离射程或进掩体后，毫秒级无缝自动锁定视野内下一名目标。",
-                            "彻底消除击杀后手动寻敌按键的空窗期，实现连续收割。")));
-
-            currentItems.add(new CycleItem("切靶策略",
-                    () -> AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get().getDisplayName(),
-                    () -> {
-                        AutoAttackerConfig.SwitchPriority cur = AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get();
-                        AutoAttackerConfig.SwitchPriority next = (cur == AutoAttackerConfig.SwitchPriority.FOV)
-                                ? AutoAttackerConfig.SwitchPriority.DISTANCE
-                                : (cur == AutoAttackerConfig.SwitchPriority.DISTANCE)
-                                ? AutoAttackerConfig.SwitchPriority.HEALTH
-                                : AutoAttackerConfig.SwitchPriority.FOV;
-                        AutoAttackerConfig.AUTO_SWITCH_PRIORITY.set(next);
-                        showToast("切靶策略: " + next.getDisplayName());
-                    },
-                    makeTooltip("自动切靶优选策略",
-                            "目标失效后选择下一位敌人的评判维度。",
-                            "【准星优先】：优先选择离当前视线角距最近的目标，视角晃动最小；",
-                            "【距离优先】：优先锁定离自己最近的近战危险敌人；",
-                            "【残血优先】：优先寻找剩余血量最低的残血目标进行斩杀。")));
-
-            currentItems.add(new CycleItem("自动搜索模式",
-                    () -> AutoAttackerConfig.AUTO_LOCK_MODE.get().getDisplayName(),
-                    () -> {
-                        AutoAttackerConfig.AutoLockMode cur = AutoAttackerConfig.AUTO_LOCK_MODE.get();
-                        AutoAttackerConfig.AutoLockMode next = switch (cur) {
-                            case OFF -> AutoAttackerConfig.AutoLockMode.HOVER;
-                            case HOVER -> AutoAttackerConfig.AutoLockMode.ALWAYS;
-                            case ALWAYS -> AutoAttackerConfig.AutoLockMode.OFF;
-                        };
-                        AutoAttackerConfig.AUTO_LOCK_MODE.set(next);
-                        showToast("自动搜索模式: " + next.getDisplayName());
-                        rebuildCurrentTab();
-                    },
-                    makeTooltip("自动搜索与锁定模式",
-                            "控制自动发现并吸附目标的运作规则：",
-                            "【关闭】：完全禁用自动索敌，仅由手动按键（R 键）进行锁定；",
-                            "【悬停锁定 (指向N秒)】：当准星指向生物持续达到设定秒数时自动锁定，甩镜头不误触；",
-                            "【始终自锁 (持械)】：手持武器时，只要视野内出现敌人立即咬合锁定。")));
-
-            if (AutoAttackerConfig.AUTO_LOCK_MODE.get() == AutoAttackerConfig.AutoLockMode.HOVER) {
-                currentItems.add(new SliderItem("悬停判定时间",
-                        AutoAttackerConfig.AUTO_LOCK_HOVER_TIME::get,
-                        val -> AutoAttackerConfig.AUTO_LOCK_HOVER_TIME.set(Math.round(val * 100.0) / 100.0),
-                        0.05, 3.0, "%.2f 秒",
-                        makeTooltip("悬停锁定延迟时长",
-                                "准星需持续停留在生物身上多久才触发自动锁定。",
-                                "推荐：0.20 ~ 0.50 秒。过短可能快速扫过时误锁，过长则响应不够敏捷。")));
-            } else if (AutoAttackerConfig.AUTO_LOCK_MODE.get() == AutoAttackerConfig.AutoLockMode.ALWAYS) {
-                currentItems.add(new SliderItem("搜索视角(FOV)",
-                        AutoAttackerConfig.AUTO_LOCK_FOV::get,
-                        val -> AutoAttackerConfig.AUTO_LOCK_FOV.set(Math.round(val * 2.0) / 2.0),
-                        15.0, 180.0, "%.0f°",
-                        makeTooltip("持械自锁搜索视场 (FOV)",
-                                "手持武器时，全自动索敌在玩家正前方检测敌人的锥形视野夹角。",
-                                "推荐值：60° ~ 90°。角度越小越集中在正前方，角度越大周边范围越广。")));
+            // 精准统一布局计算: 每个组件的 y 绝对一致！
+            int curY = contentTop + 4;
+            for (UIItem item : currentItems) {
+                item.x = x;
+                item.y = curY;
+                item.w = w;
+                curY += item.h + 4;
             }
 
-            currentItems.add(new CycleItem("手动按键模式",
-                    () -> AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.HOLD ? "长按" : "单击",
-                    () -> {
-                        AutoAttackerConfig.LockMode next = AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.HOLD ?
-                                AutoAttackerConfig.LockMode.TOGGLE : AutoAttackerConfig.LockMode.HOLD;
-                        AutoAttackerConfig.AIM_ASSIST_MODE.set(next);
-                        showToast("按键模式: " + (next == AutoAttackerConfig.LockMode.HOLD ? "长按" : "单击"));
-                    },
-                    makeTooltip("手动锁定按键机制",
-                            "快捷键（默认 R）的手动按压判定机制。",
-                            "【长按】：按住快捷键期间保持视角吸附，松开按键立即恢复自由视界；",
-                            "【单击】：按一下快捷键开启持续锁定，再次按下解除锁定。")));
-
-            currentItems.add(new CycleItem("瞄准部位",
-                    () -> AutoAttackerConfig.TARGET_PART.get().getDisplayName(),
-                    () -> {
-                        AutoAttackerConfig.TargetPart cur = AutoAttackerConfig.TARGET_PART.get();
-                        AutoAttackerConfig.TargetPart next = (cur == AutoAttackerConfig.TargetPart.HEAD)
-                                ? AutoAttackerConfig.TargetPart.TORSO
-                                : (cur == AutoAttackerConfig.TargetPart.TORSO)
-                                ? AutoAttackerConfig.TargetPart.ADAPTIVE
-                                : AutoAttackerConfig.TargetPart.HEAD;
-                        AutoAttackerConfig.TARGET_PART.set(next);
-                        showToast("瞄准部位: " + next.getDisplayName());
-                    },
-                    makeTooltip("瞄准锁定部位",
-                            "设置自瞄准星吸附的目标解算部位。",
-                            "【头部优先】：直接锁定生物眼部与头部 Hitbox，完美发挥枪械 150%~250% 爆头暴击；",
-                            "【躯干中心】：稳定瞄准身体几何中心，容错率高，适合近距腰射与霰弹枪；",
-                            "【智能自适应】：中近距离优先锁头，远距离或击退翻滚时自动回退锁胸。")));
-
-            currentItems.add(new SliderItem("锁定范围",
-                    AutoAttackerConfig.AIM_ASSIST_RANGE::get,
-                    val -> AutoAttackerConfig.AIM_ASSIST_RANGE.set(Math.round(val * 2.0) / 2.0),
-                    2.0, 120.0, "%.1f 格",
-                    makeTooltip("锁定搜索半径",
-                            "自动锁定能够感应并搜寻敌对目标的最大直线距离（格/米）。",
-                            "超出此范围的目标将不会被自瞄系统探测和吸附。",
-                            "推荐值：30.0 ~ 80.0 格（近战建议 3.0 ~ 10.0 格）。")));
-
-            currentItems.add(new SliderItem("吸附速度",
-                    AutoAttackerConfig.AIM_ASSIST_SPEED::get,
-                    val -> AutoAttackerConfig.AIM_ASSIST_SPEED.set(Math.round(val * 100.0) / 100.0),
-                    0.01, 1.0, "%.2f",
-                    makeTooltip("视角追踪平滑速度",
-                            "控制准星吸附转向目标时的角速度插值比例。",
-                            "数值越低转动越柔和平滑；数值越高转速越快（1.00 为瞬间锁死）。",
-                            "推荐值：0.20 ~ 0.45（兼具战术跟枪手感与机动性）。")));
-
-            currentItems.add(new SliderItem("死区切换",
-                    AutoAttackerConfig.LOCK_DEADZONE_THRESHOLD::get,
-                    val -> AutoAttackerConfig.LOCK_DEADZONE_THRESHOLD.set(Math.round(val * 10.0) / 10.0),
-                    1.0, 30.0, "%.1f°",
-                    makeTooltip("目标脱锁死区阈值",
-                            "强行转火与摆脱吸附的鼠标甩动角度阈值（度）。",
-                            "锁定状态下，当玩家手动向外快速移动鼠标超过此角度时，判定玩家意图转火，自动解除旧目标并优先瞄向视野内新敌人。",
-                            "有效防止因吸附锁定过死而无法转火反打。")));
-
-            if (category == ClientEvents.WeaponCategory.GUN || category == ClientEvents.WeaponCategory.OTHER) {
-                String gunHeader = (category == ClientEvents.WeaponCategory.GUN) ? "// 枪械战术 (现代枪械 / TACZ)" : "// 枪械战术 (全局预设)";
-                currentItems.add(new HeaderItem(gunHeader));
-
-                currentItems.add(new ToggleItem("枪械自动开火",
-                        AutoAttackerConfig.ENABLE_GUN_TRIGGERBOT::get,
-                        val -> {
-                            AutoAttackerConfig.ENABLE_GUN_TRIGGERBOT.set(val);
-                            showToast("枪械自动开火: " + (val ? "开启" : "关闭"));
-                        },
-                        makeTooltip("枪械自动开火 (Triggerbot)",
-                                "自瞄锁定目标且准星咬准时全自动击发。",
-                                "手持现代枪械（如 TACZ HK-416 等）且已锁定目标时，只要视线无遮挡、有弹药且非拉栓换弹状态，系统全自动进行开火扫射。",
-                                "目标击杀或脱锁时即刻安全停火，杜绝浪费弹药。")));
-
-                currentItems.add(new ToggleItem("自动压枪补偿",
-                        AutoAttackerConfig.ENABLE_ANTI_RECOIL::get,
-                        val -> {
-                            AutoAttackerConfig.ENABLE_ANTI_RECOIL.set(val);
-                            showToast("自动压枪: " + (val ? "开启" : "关闭"));
-                        },
-                        makeTooltip("智能后坐力抑制 (Anti-Recoil)",
-                                "实时抵抗枪口上跳，死咬爆头 Hitbox。",
-                                "现代枪械连发时会产生剧烈的垂直与水平后坐力散布。",
-                                "开启后系统在射击瞬间施加连续阻尼平滑补偿，消除抖动抽搐并咬紧目标。")));
-
-                currentItems.add(new SliderItem("压枪补偿强度",
-                        AutoAttackerConfig.ANTI_RECOIL_STRENGTH::get,
-                        val -> AutoAttackerConfig.ANTI_RECOIL_STRENGTH.set(Math.round(val * 100.0) / 100.0),
-                        0.1, 2.5, "%.2fx",
-                        makeTooltip("后坐力反冲补偿倍率",
-                                "控制自动压枪的反拉阻尼与刚度。",
-                                "1.00x = 匹配标准枪械垂直后坐力；",
-                                "1.50x ~ 2.00x = 针对大口径机枪或剧烈改装枪口跳跃的极限死锁。")));
-
-                currentItems.add(new ToggleItem("机瞄开镜感知",
-                        AutoAttackerConfig.ENABLE_ADS_SENSING::get,
-                        val -> {
-                            AutoAttackerConfig.ENABLE_ADS_SENSING.set(val);
-                            showToast("机瞄感知: " + (val ? "开启" : "关闭"));
-                        },
-                        makeTooltip("机瞄开镜感知 (ADS Sensing)",
-                                "智能探测右键开镜机瞄状态。",
-                                "右键机瞄放大瞄准时，系统自动切换为超平滑微调追踪算法，避免视野拉近后的画面剧烈抖动与眩晕。")));
-
-                currentItems.add(new ToggleItem("枪械空仓换弹",
-                        AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD::get,
-                        val -> {
-                            AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD.set(val);
-                            showToast("空仓自动换弹: " + (val ? "开启" : "关闭"));
-                        },
-                        makeTooltip("枪械空仓自动换弹 (Auto-Reload)",
-                                "弹药打空后自动换弹，背包无弹药时自动停用。",
-                                "当手持枪械弹匣与枪膛彻底打空至 0 发时，系统自动触发换弹动作；",
-                                "若背包中没有备用子弹，系统自动停止换弹并休眠，避免频繁发起无谓操作与性能开销。")));
-            }
-
-            if (category == ClientEvents.WeaponCategory.BOW || category == ClientEvents.WeaponCategory.OTHER) {
-                String bowHeader = (category == ClientEvents.WeaponCategory.BOW) ? "// 弹道预判 (远程弓弩)" : "// 弹道预判 (全局预设)";
-                currentItems.add(new HeaderItem(bowHeader));
-
-                currentItems.add(new ToggleItem("提前量预判",
-                        AutoAttackerConfig.ENABLE_AIM_PREDICT::get,
-                        val -> {
-                            AutoAttackerConfig.ENABLE_AIM_PREDICT.set(val);
-                            showToast("提前量预判: " + (val ? "开启" : "关闭"));
-                        },
-                        makeTooltip("提前量预判",
-                                "基于微元动力学的移动目标交会前置计算。",
-                                "根据箭矢飞行速度、重力加速度与目标的运动矢量，解算出未来交会拦截点，并将准星智能抬升与前置偏移。")));
-
-                currentItems.add(new SliderItem("预判权重",
-                        AutoAttackerConfig.AIM_PREDICT_BLEND::get,
-                        val -> AutoAttackerConfig.AIM_PREDICT_BLEND.set(Math.round(val * 100.0) / 100.0),
-                        0.0, 1.0, "%.2f",
-                        makeTooltip("预判混合插值权重",
-                                "本体准星与预判拦截点之间的融合比例。",
-                                "1.00 = 100% 瞄准未来交会预判点（对移动目标命中率最高）；",
-                                "0.00 = 纯瞄准敌人当前物理中心。")));
-
-                currentItems.add(new SliderItem("速度平滑",
-                        AutoAttackerConfig.AIM_PREDICT_SMOOTH::get,
-                        val -> AutoAttackerConfig.AIM_PREDICT_SMOOTH.set(Math.round(val * 100.0) / 100.0),
-                        0.0, 1.0, "%.2f",
-                        makeTooltip("目标速度平滑滤波",
-                                "消除目标急停、摩擦碰撞或受击击退时的瞬时抖动。",
-                                "数值越高滤波越稳定抗抖，数值越低对变向反应越灵敏。")));
-
-                currentItems.add(new SliderItem("最大射程",
-                        AutoAttackerConfig.AIM_PREDICT_MAX_DIST::get,
-                        val -> AutoAttackerConfig.AIM_PREDICT_MAX_DIST.set((double) Math.round(val)),
-                        5.0, 120.0, "%.0f 格",
-                        makeTooltip("远程预判极限距离",
-                                "提前量微元解算的最大作用直线距离（格）。",
-                                "超出此射程的目标停止提前量运算，回退为基础直瞄。")));
-
-                currentItems.add(new ToggleItem("拦截光圈",
-                        AutoAttackerConfig.ENABLE_LEAD_INDICATOR::get,
-                        val -> {
-                            AutoAttackerConfig.ENABLE_LEAD_INDICATOR.set(val);
-                            showToast("拦截光圈: " + (val ? "开启" : "关闭"));
-                        },
-                        makeTooltip("拦截指引光圈",
-                                "在世界三维空间中渲染未来拦截落点圆环。",
-                                "直观指示箭矢预计与目标相撞的战术拦截点。")));
-            }
-        } else if (currentTab == 1) {
-            // =================================================================
-            // Tab 1: 弹道 (落点预测、样式切换、目标标牌、悬浮小窗)
-            // =================================================================
-            Minecraft mc = Minecraft.getInstance();
-            Player player = mc.player;
-            ItemStack held = ClientEvents.getActiveWeapon(player);
-            ClientEvents.WeaponCategory category = ClientEvents.getWeaponCategory(held);
-
-            String predHeader = (category == ClientEvents.WeaponCategory.GUN) ? "// 弹道预测 §8(当前手持枪械为高平直瞄)" :
-                                (category == ClientEvents.WeaponCategory.MELEE) ? "// 弹道预测 §8(当前手持近战兵刃)" : "// 弹道预测 (抛物线模拟)";
-            currentItems.add(new HeaderItem(predHeader));
-
-            if (category == ClientEvents.WeaponCategory.GUN) {
-                currentItems.add(new EmptyNoticeItem("当前手持现代枪械 (高平直瞄0G)，落点预测仅在手持弓弩时生效"));
-            } else if (category == ClientEvents.WeaponCategory.MELEE) {
-                currentItems.add(new EmptyNoticeItem("当前手持近战兵刃，落点预测仅在手持远程弓弩时生效"));
-            }
-
-            currentItems.add(new ToggleItem("落点预测",
-                    AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW::get,
-                    val -> {
-                        AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW.set(val);
-                        showToast("落点预测: " + (val ? "开启" : "关闭"));
-                    },
-                    makeTooltip("落点预测",
-                            "实时抛物线前向动力学物理模拟。",
-                            "手持远程武器时，在世界中实时预计算并显示箭矢最终下坠落点方块或命中实体。")));
-
-            currentItems.add(new CycleItem("显示样式",
-                    () -> {
-                        AutoAttackerConfig.TrajectoryStyle s = AutoAttackerConfig.TRAJECTORY_STYLE.get();
-                        if (s == AutoAttackerConfig.TrajectoryStyle.HUD_RETICLE) return "2D准星";
-                        if (s == AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN) return "3D光束";
-                        if (s == AutoAttackerConfig.TrajectoryStyle.BOTH) return "双显";
-                        return "关闭";
-                    },
-                    () -> {
-                        AutoAttackerConfig.TrajectoryStyle cur = AutoAttackerConfig.TRAJECTORY_STYLE.get();
-                        AutoAttackerConfig.TrajectoryStyle next =
-                                (cur == AutoAttackerConfig.TrajectoryStyle.BOTH) ? AutoAttackerConfig.TrajectoryStyle.HUD_RETICLE :
-                                (cur == AutoAttackerConfig.TrajectoryStyle.HUD_RETICLE) ? AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN :
-                                (cur == AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN) ? AutoAttackerConfig.TrajectoryStyle.OFF :
-                                AutoAttackerConfig.TrajectoryStyle.BOTH;
-                        AutoAttackerConfig.TRAJECTORY_STYLE.set(next);
-                        String name = (next == AutoAttackerConfig.TrajectoryStyle.HUD_RETICLE) ? "2D准星" :
-                                      (next == AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN) ? "3D光束" :
-                                      (next == AutoAttackerConfig.TrajectoryStyle.BOTH) ? "双显" : "关闭";
-                        showToast("显示样式: " + name);
-                    },
-                    makeTooltip("落点显示样式",
-                            "切换抛物线落点的视觉呈现形式。",
-                            "【2D准星】：在最终落点处渲染屏幕平视战术准星；",
-                            "【3D光束】：从玩家手持发射源到落点渲染粒子轨迹链；",
-                            "【双显】：同时开启 2D 准星标记与 3D 轨迹粒子；",
-                            "【关闭】：隐藏所有落点预测画面。")));
-
-            currentItems.add(new ToggleItem("仅手持显示",
-                    AutoAttackerConfig.HUD_ONLY_WHEN_HOLDING_BOW::get,
-                    val -> {
-                        AutoAttackerConfig.HUD_ONLY_WHEN_HOLDING_BOW.set(val);
-                        showToast("仅手持显示: " + (val ? "开启" : "关闭"));
-                    },
-                    makeTooltip("仅手持远程武器显示",
-                            "手持感知与视界防遮挡过滤。",
-                            "开启后，仅在主手或副手手持远程弓弩武器时才渲染抛物线；空手、拿剑或工具时自动隐藏，保持战斗视界清爽。")));
-
-            currentItems.add(new HeaderItem("// 目标标牌"));
-
-            currentItems.add(new ToggleItem("距离数值",
-                    AutoAttackerConfig.SHOW_DISTANCE::get,
-                    val -> {
-                        AutoAttackerConfig.SHOW_DISTANCE.set(val);
-                        showToast("距离显示: " + (val ? "开启" : "关闭"));
-                    },
-                    makeTooltip("距离数值标牌",
-                            "战术测距仪 HUD 叠加。",
-                            "在当前锁定或瞄准的目标头顶显示精确到 0.1 米的直线距离。")));
-
-            currentItems.add(new ToggleItem("目标血条",
-                    AutoAttackerConfig.SHOW_HEALTH_BAR::get,
-                    val -> {
-                        AutoAttackerConfig.SHOW_HEALTH_BAR.set(val);
-                        showToast("血条显示: " + (val ? "开启" : "关闭"));
-                    },
-                    makeTooltip("目标生命条标牌",
-                            "敌人战术血量显示。",
-                            "在锁定目标头顶展示当前生命值与最大生命值比例血条。")));
-
-            currentItems.add(new HeaderItem("// 悬浮小窗"));
-
-            currentItems.add(new ToggleItem("U键小窗",
-                    AutoAttackerConfig.ENABLE_DEBUG_OVERLAY::get,
-                    val -> {
-                        AutoAttackerConfig.ENABLE_DEBUG_OVERLAY.set(val);
-                        showToast("悬浮小窗: " + (val ? "开启" : "关闭"));
-                    },
-                    makeTooltip("U键悬浮监视小窗",
-                            "实时弹道参数 HUD 监控窗口。",
-                            "在屏幕左上角显示当前武器初速、重力、飞行时间及蓄力状态等底层物理数据。",
-                            "在游戏中随时按 U 键即可快速切换小窗显隐。")));
-
-            currentItems.add(new ButtonItem("重置小窗位置到左上角", () -> {
-                TacticalDebugPanel.setPosition(12, 36);
-                showToast("小窗位置已重置 (12, 36)");
-            }, makeTooltip("重置小窗坐标", "将悬浮小窗位置重置到默认安全坐标 (X:12, Y:36)。")));
-
-        } else if (currentTab == 2) {
-            // =================================================================
-            // Tab 2: 武器特征档案库 (默认折叠、分页上限防卡顿、字母/时间正倒序排序)
-            // =================================================================
-            Minecraft mc = Minecraft.getInstance();
-            Player player = mc.player;
-            ItemStack held = ClientEvents.getActiveWeapon(player);
-            ClientEvents.WeaponCategory category = ClientEvents.getWeaponCategory(held);
-
-            currentItems.add(new HeaderItem("// 当前手持武器状态"));
-            if (category == ClientEvents.WeaponCategory.GUN) {
-                AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(held);
-                currentItems.add(new HeldWeaponStatusCard(held, profile));
-                final ItemStack finalHeld = held;
-                currentItems.add(new ButtonItem("重置当前枪械档案 (恢复原厂直瞄)", () -> {
-                    AutoBallisticsTracker.resetProfile(finalHeld);
-                    showToast("当前枪械档案已重置为原厂直瞄");
-                    rebuildCurrentTab();
-                }, makeTooltip("枪械原厂重置",
-                        "将当前手持枪械的弹道档案重置为原厂直瞄参数（初速恢复出厂值，重力归零）。",
-                        "保持高平直射，无下坠无仰角。")).withConfirmation("§c再次点击确认恢复原厂直瞄"));
-            } else if (category == ClientEvents.WeaponCategory.BOW) {
-                AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(held);
-                currentItems.add(new HeldWeaponStatusCard(held, profile));
-                final ItemStack finalHeld = held;
-                currentItems.add(new ButtonItem("从当前物品描述重新解析", () -> {
-                    AutoBallisticsTracker.reparseTooltip(finalHeld);
-                    showToast("已从描述重新解析参数");
-                    rebuildCurrentTab();
-                }, makeTooltip("Tooltip 语义反演",
-                        "重新扫描当前手持武器的 Tooltip 文本描述。",
-                        "提取例如 '1.8 Projectile Speed' 或 '0.75 Draw Time' 等模组专属物理属性。")));
-
-                currentItems.add(new ButtonItem("重置当前武器档案 (重新自适应)", () -> {
-                    AutoBallisticsTracker.resetProfile(finalHeld);
-                    showToast("当前武器档案已重置");
-                    rebuildCurrentTab();
-                }, makeTooltip("自适应档案重置",
-                        "从特征库中清除当前手持武器的档案记录。",
-                        "下次射击时，系统将根据箭矢真实飞行轨迹重新自适应学习。")).withConfirmation("§c再次点击确认重置档案"));
-            } else if (category == ClientEvents.WeaponCategory.MELEE) {
-                currentItems.add(new HeldMeleeStatusCard(held));
-            } else {
-                currentItems.add(new EmptyNoticeItem("当前未手持武器 (手持枪械/弓弩/近战时将自动识别)"));
-            }
-
-            // 档案库折叠与条目全景
-            Map<String, AutoBallisticsTracker.BallisticsProfile> cacheEntries = AutoBallisticsTracker.getCacheEntries();
-            int totalEntries = cacheEntries.size();
-
-            currentItems.add(new HeaderItem("// 武器档案库 (已存 " + totalEntries + " 种)"));
-
-            if (!isArchiveExpanded) {
-                // 默认折叠收缩状态 (零多余渲染消耗)
-                currentItems.add(new ButtonItem("▶ 展开武器档案列表 (" + totalEntries + " 种)", () -> {
-                    isArchiveExpanded = true;
-                    archivePage = 0;
-                    rebuildCurrentTab();
-                }, makeTooltip("展开武器档案列表", "展开查看所有已学习的武器档案条目（配有防卡顿分页与多维排序）。")));
-            } else {
-                // 展开状态
-                currentItems.add(new ButtonItem("▼ 折叠武器档案列表", () -> {
-                    isArchiveExpanded = false;
-                    rebuildCurrentTab();
-                }, makeTooltip("折叠武器档案列表", "收起档案列表，保持控制台精简清爽。")));
-
-                if (cacheEntries.isEmpty()) {
-                    currentItems.add(new EmptyNoticeItem("档案库为空 (使用武器时将自动建立档案)"));
-                } else {
-                    // 1. 排序控制栏 (依据: 时间/字母, 方向: 倒序/正序)
-                    currentItems.add(new SortBarItem(
-                            () -> archiveSortByTime ? "依据: 时间" : "依据: 字母",
-                            () -> {
-                                archiveSortByTime = !archiveSortByTime;
-                                archivePage = 0;
-                                rebuildCurrentTab();
-                            },
-                            makeTooltip("档案排序依据",
-                                    "切换武器档案列表的排序维度。",
-                                    "【时间】：按武器录入或最近更新时间排序；",
-                                    "【字母】：按武器名称拼音/字母排序 (A-Z)。",
-                                    "§8(点击切换依据)"),
-                            () -> archiveSortAscending ? "方向: 正序 ↑" : "方向: 倒序 ↓",
-                            () -> {
-                                archiveSortAscending = !archiveSortAscending;
-                                archivePage = 0;
-                                rebuildCurrentTab();
-                            },
-                            makeTooltip("档案排序方向",
-                                    "切换正序或倒序排列。",
-                                    "【倒序 ↓】：最新录入在最前 / Z 到 A；",
-                                    "【正序 ↑】：最早录入在最前 / A 到 Z。",
-                                    "§8(点击切换方向)")
-                    ));
-
-                    // 2. 排序列表条目 (名称预映射计算，避免 O(N log N) 比较时重复创建 ItemStack)
-                    List<Map.Entry<String, AutoBallisticsTracker.BallisticsProfile>> entryList = new ArrayList<>(cacheEntries.entrySet());
-                    if (archiveSortByTime) {
-                        entryList.sort((e1, e2) -> {
-                            long t1 = e1.getValue().lastUpdated;
-                            long t2 = e2.getValue().lastUpdated;
-                            int cmp = Long.compare(t1, t2);
-                            return archiveSortAscending ? cmp : -cmp; // 倒序 = 较大时间戳在前
-                        });
-                    } else {
-                        Map<String, String> nameCache = new HashMap<>(entryList.size());
-                        for (Map.Entry<String, AutoBallisticsTracker.BallisticsProfile> e : entryList) {
-                            nameCache.put(e.getKey(), getReadableWeaponName(e.getKey()));
-                        }
-                        entryList.sort((e1, e2) -> {
-                            String n1 = nameCache.getOrDefault(e1.getKey(), "");
-                            String n2 = nameCache.getOrDefault(e2.getKey(), "");
-                            int cmp = n1.compareToIgnoreCase(n2);
-                            return archiveSortAscending ? cmp : -cmp;
-                        });
-                    }
-
-                    int maxPages = Math.max(1, (int) Math.ceil((double) entryList.size() / ARCHIVE_PAGE_SIZE));
-                    if (archivePage >= maxPages) archivePage = maxPages - 1;
-                    if (archivePage < 0) archivePage = 0;
-
-                    // 3. 分页控制栏 (若超过 1 页)
-                    if (maxPages > 1) {
-                        currentItems.add(new PaginationBarItem(archivePage + 1, maxPages,
-                                () -> {
-                                    if (archivePage > 0) {
-                                        archivePage--;
-                                        rebuildCurrentTab();
-                                    }
-                                },
-                                () -> {
-                                    if (archivePage < maxPages - 1) {
-                                        archivePage++;
-                                        rebuildCurrentTab();
-                                    }
-                                }));
-                    }
-
-                    // 4. 限制只渲染当前页的至多 15 条，杜绝掉帧
-                    int startIdx = archivePage * ARCHIVE_PAGE_SIZE;
-                    int endIdx = Math.min(startIdx + ARCHIVE_PAGE_SIZE, entryList.size());
-
-                    for (int i = startIdx; i < endIdx; i++) {
-                        var entry = entryList.get(i);
-                        String sig = entry.getKey();
-                        AutoBallisticsTracker.BallisticsProfile prof = entry.getValue();
-
-                        currentItems.add(new ProfileArchiveCard(sig, prof, () -> {
-                            AutoBallisticsTracker.removeProfileByKey(sig);
-                            showToast("已删除档案: " + getReadableWeaponName(sig));
-                            rebuildCurrentTab();
-                        }));
-                    }
-                }
-            }
-
-            currentItems.add(new HeaderItem("// 全局档案维护"));
-            currentItems.add(new ButtonItem("恢复原厂预设武器档案", () -> {
-                AutoBallisticsTracker.clearAllCache();
-                showToast("已恢复原厂权威预设档案 (16种经典武器)");
-                rebuildCurrentTab();
-            }, makeTooltip("恢复原厂预设", "清空自定义微调记录，并将档案库重置恢复为 16 种经典与主流模组弓弩的原厂权威物理基准。")).withConfirmation("§c§l再次点击确认恢复原厂预设"));
-
-            currentItems.add(new ButtonItem("保存档案库到本地磁盘", () -> {
-                AutoBallisticsTracker.saveToDiskImmediate();
-                showToast("武器档案已持久化到磁盘");
-            }, makeTooltip("保存到磁盘", "强制立即将当前内存中的武器档案库写入 combathelper_ballistics.json 文件。")));
-
-        } else {
-            // =================================================================
-            // Tab 3: 名单管理 (4分段直切、一键录入、单项红X删除、多维排序)
-            // =================================================================
-            Minecraft mc = Minecraft.getInstance();
-            Player player = mc.player;
-            ItemStack held = player != null ? player.getMainHandItem() : ItemStack.EMPTY;
-
-            // 1. 顶部 4 分段直选导航栏
-            currentItems.add(new HeaderItem("// 名单分类"));
-            String[] categoryLabels = {
-                    "免重力 (" + AutoAttackerConfig.ZERO_GRAVITY_BOWS.get().size() + ")",
-                    "黑名单 (" + AutoAttackerConfig.BLACKLIST.get().size() + ")",
-                    "白名单 (" + AutoAttackerConfig.WHITELIST.get().size() + ")",
-                    "排除 (" + AutoAttackerConfig.ENTITY_BLACKLIST.get().size() + ")"
-            };
-            currentItems.add(new SegmentedBarItem(categoryLabels, () -> activeListCategory, cat -> {
-                activeListCategory = cat;
-                rebuildCurrentTab();
-            }));
-
-            // 2. 极简快捷录入行 (直观明了)
-            currentItems.add(new HeaderItem("// 快捷录入"));
-            if (activeListCategory < 3) {
-                // 物品类名单 (免重力弓 / 攻击黑名单 / 攻击白名单)
-                if (!held.isEmpty()) {
-                    Item item = held.getItem();
-                    ResourceLocation loc = ForgeRegistries.ITEMS.getKey(item);
-                    String itemStr = loc != null ? loc.toString() : "";
-                    List<String> curList = new ArrayList<>(getListConfig(activeListCategory).get());
-                    boolean contains = curList.contains(itemStr);
-
-                    currentItems.add(new QuickItemActionCard(held, contains,
-                            LIST_CATEGORY_NAMES[activeListCategory], () -> {
-                        if (contains) {
-                            curList.remove(itemStr);
-                            showToast("已移出: " + held.getHoverName().getString());
-                        } else {
-                            curList.add(itemStr);
-                            showToast("已添加: " + held.getHoverName().getString());
-                        }
-                        getListConfig(activeListCategory).set(curList);
-                        AutoAttackerConfig.refreshLists();
-                        AutoAttackerConfig.saveConfig();
-                        rebuildCurrentTab();
-                    }));
-                } else {
-                    currentItems.add(new EmptyNoticeItem("主手未持有物品 (手持物品即可一键录入)"));
-                }
-            } else {
-                // 实体类名单 (排除实体)
-                LivingEntity target = ClientEvents.getCurrentTarget();
-                if (target != null && target.isAlive()) {
-                    ResourceLocation eloc = ForgeRegistries.ENTITY_TYPES.getKey(target.getType());
-                    String entityStr = eloc != null ? eloc.toString() : "";
-                    List<String> curList = new ArrayList<>(AutoAttackerConfig.ENTITY_BLACKLIST.get());
-                    boolean contains = curList.contains(entityStr);
-
-                    currentItems.add(new QuickEntityActionCard(target, contains, () -> {
-                        if (contains) {
-                            curList.remove(entityStr);
-                            showToast("已移出排除: " + target.getName().getString());
-                        } else {
-                            curList.add(entityStr);
-                            showToast("已加入排除: " + target.getName().getString());
-                        }
-                        AutoAttackerConfig.ENTITY_BLACKLIST.set(curList);
-                        AutoAttackerConfig.refreshLists();
-                        AutoAttackerConfig.saveConfig();
-                        rebuildCurrentTab();
-                    }));
-                } else {
-                    currentItems.add(new EmptyNoticeItem("准星未锁定实体 (瞄准目标即可一键排除)"));
-                }
-            }
-
-            // 3. 名单全景条目与排序
-            List<String> entries = new ArrayList<>(getListConfig(activeListCategory).get());
-            currentItems.add(new HeaderItem("// " + LIST_CATEGORY_NAMES[activeListCategory] + " 条目 (" + entries.size() + " 项，点击红 X 删除)"));
-
-            if (entries.isEmpty()) {
-                currentItems.add(new EmptyNoticeItem("该名单为空"));
-            } else {
-                boolean isEntity = (activeListCategory == 3);
-
-                // 排序控制栏
-                currentItems.add(new SortBarItem(
-                        () -> listSortByTime ? "依据: 录入时间" : "依据: 名称字母",
-                        () -> {
-                            listSortByTime = !listSortByTime;
-                            rebuildCurrentTab();
-                        },
-                        makeTooltip("名单排序依据",
-                                "切换名单条目列表的排序维度。",
-                                "【录入时间】：按加入名单的先后次序排序；",
-                                "【名称字母】：按显示名称或注册 ID 字母排序 (A-Z)。",
-                                "§8(点击切换依据)"),
-                        () -> listSortAscending ? "方向: 正序 ↑" : "方向: 倒序 ↓",
-                        () -> {
-                            listSortAscending = !listSortAscending;
-                            rebuildCurrentTab();
-                        },
-                        makeTooltip("名单排序方向",
-                                "切换排序方向。",
-                                "【倒序 ↓】：最新加入在最前 / Z 到 A；",
-                                "【正序 ↑】：最早加入在最前 / A 到 Z。",
-                                "§8(点击切换方向)")
-                ));
-
-                // 记录原始索引作为录入先后依据
-                Map<String, Integer> originIndices = new HashMap<>();
-                for (int i = 0; i < entries.size(); i++) {
-                    originIndices.put(entries.get(i), i);
-                }
-
-                if (listSortByTime) {
-                    entries.sort((id1, id2) -> {
-                        int idx1 = originIndices.getOrDefault(id1, 0);
-                        int idx2 = originIndices.getOrDefault(id2, 0);
-                        int cmp = Integer.compare(idx1, idx2);
-                        return listSortAscending ? cmp : -cmp; // 倒序 = 较大索引(最新)在前
-                    });
-                } else {
-                    Map<String, String> nameCache = new HashMap<>(entries.size());
-                    for (String rawId : entries) {
-                        nameCache.put(rawId, getReadableEntryName(rawId, isEntity));
-                    }
-                    entries.sort((id1, id2) -> {
-                        String n1 = nameCache.getOrDefault(id1, "");
-                        String n2 = nameCache.getOrDefault(id2, "");
-                        int cmp = n1.compareToIgnoreCase(n2);
-                        return listSortAscending ? cmp : -cmp;
-                    });
-                }
-
-                for (String rawId : entries) {
-                    currentItems.add(new ListEntryCard(rawId, isEntity, () -> {
-                        List<String> list = new ArrayList<>(getListConfig(activeListCategory).get());
-                        list.remove(rawId);
-                        getListConfig(activeListCategory).set(list);
-                        AutoAttackerConfig.refreshLists();
-                        AutoAttackerConfig.saveConfig();
-                        showToast("已删除: " + rawId);
-                        rebuildCurrentTab();
-                    }));
-                }
-            }
-
-            // 4. 底部并排紧凑维护栏
-            currentItems.add(new HeaderItem("// 名单维护"));
-            currentItems.add(new DualButtonItem(
-                    "清空当前名单", () -> {
-                getListConfig(activeListCategory).set(List.of());
-                AutoAttackerConfig.refreshLists();
-                AutoAttackerConfig.saveConfig();
-                showToast(LIST_CATEGORY_NAMES[activeListCategory] + " 已清空");
-                rebuildCurrentTab();
-            },
-                    "恢复默认名单", () -> {
-                AutoAttackerConfig.ZERO_GRAVITY_BOWS.set(List.of("extrabotany:failnaught"));
-                AutoAttackerConfig.BLACKLIST.set(List.of());
-                AutoAttackerConfig.WHITELIST.set(List.of());
-                AutoAttackerConfig.ENTITY_BLACKLIST.set(List.of("minecraft:villager", "minecraft:armor_stand"));
-                AutoAttackerConfig.refreshLists();
-                AutoAttackerConfig.saveConfig();
-                showToast("已恢复全部名单为默认");
-                rebuildCurrentTab();
-            }
-            ).withConfirmation(true, true));
-        }
-
-        // 精准统一布局计算: 每个组件的 y 绝对一致！
-        int curY = contentTop + 4;
-        for (UIItem item : currentItems) {
-            item.x = x;
-            item.y = curY;
-            item.w = w;
-            curY += item.h + 4;
-        }
-
-        int contentBottom = this.height - 36;
-        int contentH = contentBottom - contentTop;
-        int totalContentH = curY - (contentTop + 4) + 12;
-        this.maxScroll = Math.max(0, totalContentH - contentH);
-        this.scrollOffset = Mth.clamp(this.scrollOffset, 0.0, this.maxScroll);
+            int contentBottom = this.height - 36;
+            int contentH = contentBottom - contentTop;
+            int totalContentH = curY - (contentTop + 4) + 12;
+            this.maxScroll = Math.max(0, totalContentH - contentH);
+            this.scrollOffset = Mth.clamp(this.scrollOffset, 0.0, this.maxScroll);
         } catch (Throwable t) {
             t.printStackTrace();
             currentItems.clear();
@@ -914,6 +174,758 @@ public class TacticalConsoleScreen extends Screen {
                 curY += item.h + 4;
             }
         }
+    }
+
+    private void buildLockTab() {
+        // =================================================================
+        // Tab 0: 锁定 (根据手持武器4态智能自适应)
+        // =================================================================
+        Minecraft mc = Minecraft.getInstance();
+        Player player = mc.player;
+        ItemStack held = ClientEvents.getActiveWeapon(player);
+        ClientEvents.WeaponCategory category = ClientEvents.getWeaponCategory(held);
+
+        // 顶部手持状态大卡片
+        currentItems.add(new WeaponBannerCard(held, category));
+
+        currentItems.add(new HeaderItem("// 核心总控"));
+
+        currentItems.add(new ToggleItem("模组总开关",
+                AutoAttackerConfig.ENABLE_MOD::get,
+                val -> {
+                    AutoAttackerConfig.ENABLE_MOD.set(val);
+                    showToast("模组: " + (val ? "已启用" : "已禁用"));
+                },
+                makeTooltip("模组总开关",
+                        "Auto Attacker 战术核心总控制开关。",
+                        "关闭后将立即休眠所有自动化功能，包括自动近战挥击、自动拉弓射箭、自瞄吸附与提前量预判。")));
+
+        currentItems.add(new ToggleItem("自动近战挥击",
+                AutoAttackerConfig.ENABLE_AUTO_ATTACK::get,
+                val -> {
+                    AutoAttackerConfig.ENABLE_AUTO_ATTACK.set(val);
+                    showToast("自动近战: " + (val ? "开启" : "关闭"));
+                },
+                makeTooltip("自动近战挥击",
+                        "智能武器 CD 满蓄力精准同步挥砍。",
+                        "按住攻击键（左键）时，系统自动在武器蓄力冷却（Attack Indicator）达到 100% 满额时出刀。",
+                        "确保每一击发挥最大基础伤害与横扫暴击，彻底杜绝过快乱击导致的伤害严重折减。")));
+
+        if (category == ClientEvents.WeaponCategory.BOW || category == ClientEvents.WeaponCategory.OTHER) {
+            currentItems.add(new ToggleItem("满蓄力自动放箭",
+                    AutoAttackerConfig.ENABLE_AUTO_SHOOT::get,
+                    val -> {
+                        AutoAttackerConfig.ENABLE_AUTO_SHOOT.set(val);
+                        showToast("自动放箭: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("满蓄力自动放箭",
+                            "远程弓弩满蓄力即刻自动释放。",
+                            "手持弓弩按住使用键（右键）蓄力时，一旦武器拉至 100% 最大初速蓄力点，立即自动放箭。",
+                            "自动适配神话 (Apotheosis) 蓄力速度宝石与植物学弓，杜绝早泄下坠或过度拉满浪费后摇。")));
+        }
+
+        currentItems.add(new HeaderItem("// 瞄准吸附"));
+
+        currentItems.add(new ToggleItem("自瞄吸附",
+                AutoAttackerConfig.ENABLE_AIM_ASSIST::get,
+                val -> {
+                    AutoAttackerConfig.ENABLE_AIM_ASSIST.set(val);
+                    showToast("自瞄吸附: " + (val ? "开启" : "关闭"));
+                },
+                makeTooltip("自瞄吸附",
+                        "平滑磁力视角锁定系统。",
+                        "按下锁定快捷键（默认 R 键）时，准星视角将自动吸附并持续咬住射程内最近的目标。")));
+
+        currentItems.add(new CycleItem("瞄准模式",
+                () -> AutoAttackerConfig.AIM_LOCK_TYPE.get().getDisplayName(),
+                () -> {
+                    AutoAttackerConfig.AimLockType next = AutoAttackerConfig.AIM_LOCK_TYPE.get() == AutoAttackerConfig.AimLockType.SMOOTH ?
+                            AutoAttackerConfig.AimLockType.HARD : AutoAttackerConfig.AimLockType.SMOOTH;
+                    AutoAttackerConfig.AIM_LOCK_TYPE.set(next);
+                    showToast("瞄准模式: " + next.getDisplayName());
+                },
+                makeTooltip("强锁与平滑模式切换",
+                        "控制自瞄锁死强度与转向机制。",
+                        "【平滑自瞄】：采用物理插值渐进跟枪，动作平滑拟真，适合日常体验；",
+                        "【极速强锁】：0 帧瞬间咬死目标与落点，免疫反向鼠标阻力与强后坐力，绝对死锁！")));
+
+        currentItems.add(new ToggleItem("自动切换目标",
+                AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET::get,
+                val -> {
+                    AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.set(val);
+                    showToast("自动切靶: " + (val ? "开启" : "关闭"));
+                },
+                makeTooltip("自动切换目标 (Switch on Kill)",
+                        "当前锁定目标死亡、脱离射程或进掩体后，毫秒级无缝自动锁定视野内下一名目标。",
+                        "彻底消除击杀后手动寻敌按键的空窗期，实现连续收割。")));
+
+        currentItems.add(new CycleItem("切靶策略",
+                () -> AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get().getDisplayName(),
+                () -> {
+                    AutoAttackerConfig.SwitchPriority cur = AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get();
+                    AutoAttackerConfig.SwitchPriority next = (cur == AutoAttackerConfig.SwitchPriority.FOV)
+                            ? AutoAttackerConfig.SwitchPriority.DISTANCE
+                            : (cur == AutoAttackerConfig.SwitchPriority.DISTANCE)
+                            ? AutoAttackerConfig.SwitchPriority.HEALTH
+                            : AutoAttackerConfig.SwitchPriority.FOV;
+                    AutoAttackerConfig.AUTO_SWITCH_PRIORITY.set(next);
+                    showToast("切靶策略: " + next.getDisplayName());
+                },
+                makeTooltip("自动切靶优选策略",
+                        "目标失效后选择下一位敌人的评判维度。",
+                        "【准星优先】：优先选择离当前视线角距最近的目标，视角晃动最小；",
+                        "【距离优先】：优先锁定离自己最近的近战危险敌人；",
+                        "【残血优先】：优先寻找剩余血量最低的残血目标进行斩杀。")));
+
+        currentItems.add(new CycleItem("自动搜索模式",
+                () -> AutoAttackerConfig.AUTO_LOCK_MODE.get().getDisplayName(),
+                () -> {
+                    AutoAttackerConfig.AutoLockMode cur = AutoAttackerConfig.AUTO_LOCK_MODE.get();
+                    AutoAttackerConfig.AutoLockMode next = switch (cur) {
+                        case OFF -> AutoAttackerConfig.AutoLockMode.HOVER;
+                        case HOVER -> AutoAttackerConfig.AutoLockMode.ALWAYS;
+                        case ALWAYS -> AutoAttackerConfig.AutoLockMode.OFF;
+                    };
+                    AutoAttackerConfig.AUTO_LOCK_MODE.set(next);
+                    showToast("自动搜索模式: " + next.getDisplayName());
+                    rebuildCurrentTab();
+                },
+                makeTooltip("自动搜索与锁定模式",
+                        "控制自动发现并吸附目标的运作规则：",
+                        "【关闭】：完全禁用自动索敌，仅由手动按键（R 键）进行锁定；",
+                        "【悬停锁定 (指向N秒)】：当准星指向生物持续达到设定秒数时自动锁定，甩镜头不误触；",
+                        "【始终自锁 (持械)】：手持武器时，只要视野内出现敌人立即咬合锁定。")));
+
+        if (AutoAttackerConfig.AUTO_LOCK_MODE.get() == AutoAttackerConfig.AutoLockMode.HOVER) {
+            currentItems.add(new SliderItem("悬停判定时间",
+                    AutoAttackerConfig.AUTO_LOCK_HOVER_TIME::get,
+                    val -> AutoAttackerConfig.AUTO_LOCK_HOVER_TIME.set(Math.round(val * 100.0) / 100.0),
+                    0.05, 3.0, "%.2f 秒",
+                    makeTooltip("悬停锁定延迟时长",
+                            "准星需持续停留在生物身上多久才触发自动锁定。",
+                            "推荐：0.20 ~ 0.50 秒。过短可能快速扫过时误锁，过长则响应不够敏捷。")));
+        } else if (AutoAttackerConfig.AUTO_LOCK_MODE.get() == AutoAttackerConfig.AutoLockMode.ALWAYS) {
+            currentItems.add(new SliderItem("搜索视角(FOV)",
+                    AutoAttackerConfig.AUTO_LOCK_FOV::get,
+                    val -> AutoAttackerConfig.AUTO_LOCK_FOV.set(Math.round(val * 2.0) / 2.0),
+                    15.0, 180.0, "%.0f°",
+                    makeTooltip("持械自锁搜索视场 (FOV)",
+                            "手持武器时，全自动索敌在玩家正前方检测敌人的锥形视野夹角。",
+                            "推荐值：60° ~ 90°。角度越小越集中在正前方，角度越大周边范围越广。")));
+        }
+
+        currentItems.add(new CycleItem("手动按键模式",
+                () -> AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.HOLD ? "长按" : "单击",
+                () -> {
+                    AutoAttackerConfig.LockMode next = AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.HOLD ?
+                            AutoAttackerConfig.LockMode.TOGGLE : AutoAttackerConfig.LockMode.HOLD;
+                    AutoAttackerConfig.AIM_ASSIST_MODE.set(next);
+                    showToast("按键模式: " + (next == AutoAttackerConfig.LockMode.HOLD ? "长按" : "单击"));
+                },
+                makeTooltip("手动锁定按键机制",
+                        "快捷键（默认 R）的手动按压判定机制。",
+                        "【长按】：按住快捷键期间保持视角吸附，松开按键立即恢复自由视界；",
+                        "【单击】：按一下快捷键开启持续锁定，再次按下解除锁定。")));
+
+        currentItems.add(new CycleItem("瞄准部位",
+                () -> AutoAttackerConfig.TARGET_PART.get().getDisplayName(),
+                () -> {
+                    AutoAttackerConfig.TargetPart cur = AutoAttackerConfig.TARGET_PART.get();
+                    AutoAttackerConfig.TargetPart next = (cur == AutoAttackerConfig.TargetPart.HEAD)
+                            ? AutoAttackerConfig.TargetPart.TORSO
+                            : (cur == AutoAttackerConfig.TargetPart.TORSO)
+                            ? AutoAttackerConfig.TargetPart.ADAPTIVE
+                            : AutoAttackerConfig.TargetPart.HEAD;
+                    AutoAttackerConfig.TARGET_PART.set(next);
+                    showToast("瞄准部位: " + next.getDisplayName());
+                },
+                makeTooltip("瞄准锁定部位",
+                        "设置自瞄准星吸附的目标解算部位。",
+                        "【头部优先】：直接锁定生物眼部与头部 Hitbox，完美发挥枪械 150%~250% 爆头暴击；",
+                        "【躯干中心】：稳定瞄准身体几何中心，容错率高，适合近距腰射与霰弹枪；",
+                        "【智能自适应】：中近距离优先锁头，远距离或击退翻滚时自动回退锁胸。")));
+
+        currentItems.add(new SliderItem("锁定范围",
+                AutoAttackerConfig.AIM_ASSIST_RANGE::get,
+                val -> AutoAttackerConfig.AIM_ASSIST_RANGE.set(Math.round(val * 2.0) / 2.0),
+                2.0, 120.0, "%.1f 格",
+                makeTooltip("锁定搜索半径",
+                        "自动锁定能够感应并搜寻敌对目标的最大直线距离（格/米）。",
+                        "超出此范围的目标将不会被自瞄系统探测和吸附。",
+                        "推荐值：30.0 ~ 80.0 格（近战建议 3.0 ~ 10.0 格）。")));
+
+        currentItems.add(new SliderItem("吸附速度",
+                AutoAttackerConfig.AIM_ASSIST_SPEED::get,
+                val -> AutoAttackerConfig.AIM_ASSIST_SPEED.set(Math.round(val * 100.0) / 100.0),
+                0.01, 1.0, "%.2f",
+                makeTooltip("视角追踪平滑速度",
+                        "控制准星吸附转向目标时的角速度插值比例。",
+                        "数值越低转动越柔和平滑；数值越高转速越快（1.00 为瞬间锁死）。",
+                        "推荐值：0.20 ~ 0.45（兼具战术跟枪手感与机动性）。")));
+
+        currentItems.add(new SliderItem("死区切换",
+                AutoAttackerConfig.LOCK_DEADZONE_THRESHOLD::get,
+                val -> AutoAttackerConfig.LOCK_DEADZONE_THRESHOLD.set(Math.round(val * 10.0) / 10.0),
+                1.0, 30.0, "%.1f°",
+                makeTooltip("目标脱锁死区阈值",
+                        "强行转火与摆脱吸附的鼠标甩动角度阈值（度）。",
+                        "锁定状态下，当玩家手动向外快速移动鼠标超过此角度时，判定玩家意图转火，自动解除旧目标并优先瞄向视野内新敌人。",
+                        "有效防止因吸附锁定过死而无法转火反打。")));
+
+        if (category == ClientEvents.WeaponCategory.GUN || category == ClientEvents.WeaponCategory.OTHER) {
+            String gunHeader = (category == ClientEvents.WeaponCategory.GUN) ? "// 枪械战术 (现代枪械 / TACZ)" : "// 枪械战术 (全局预设)";
+            currentItems.add(new HeaderItem(gunHeader));
+
+            currentItems.add(new ToggleItem("枪械自动开火",
+                    AutoAttackerConfig.ENABLE_GUN_TRIGGERBOT::get,
+                    val -> {
+                        AutoAttackerConfig.ENABLE_GUN_TRIGGERBOT.set(val);
+                        showToast("枪械自动开火: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("枪械自动开火 (Triggerbot)",
+                            "自瞄锁定目标且准星咬准时全自动击发。",
+                            "手持现代枪械（如 TACZ HK-416 等）且已锁定目标时，只要视线无遮挡、有弹药且非拉栓换弹状态，系统全自动进行开火扫射。",
+                            "目标击杀或脱锁时即刻安全停火，杜绝浪费弹药。")));
+
+            currentItems.add(new ToggleItem("自动压枪补偿",
+                    AutoAttackerConfig.ENABLE_ANTI_RECOIL::get,
+                    val -> {
+                        AutoAttackerConfig.ENABLE_ANTI_RECOIL.set(val);
+                        showToast("自动压枪: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("智能后坐力抑制 (Anti-Recoil)",
+                            "实时抵抗枪口上跳，死咬爆头 Hitbox。",
+                            "现代枪械连发时会产生剧烈的垂直与水平后坐力散布。",
+                            "开启后系统在射击瞬间施加连续阻尼平滑补偿，消除抖动抽搐并咬紧目标。")));
+
+            currentItems.add(new SliderItem("压枪补偿强度",
+                    AutoAttackerConfig.ANTI_RECOIL_STRENGTH::get,
+                    val -> AutoAttackerConfig.ANTI_RECOIL_STRENGTH.set(Math.round(val * 100.0) / 100.0),
+                    0.1, 2.5, "%.2fx",
+                    makeTooltip("后坐力反冲补偿倍率",
+                            "控制自动压枪的反拉阻尼与刚度。",
+                            "1.00x = 匹配标准枪械垂直后坐力；",
+                            "1.50x ~ 2.00x = 针对大口径机枪或剧烈改装枪口跳跃的极限死锁。")));
+
+            currentItems.add(new ToggleItem("机瞄开镜感知",
+                    AutoAttackerConfig.ENABLE_ADS_SENSING::get,
+                    val -> {
+                        AutoAttackerConfig.ENABLE_ADS_SENSING.set(val);
+                        showToast("机瞄感知: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("机瞄开镜感知 (ADS Sensing)",
+                            "智能探测右键开镜机瞄状态。",
+                            "右键机瞄放大瞄准时，系统自动切换为超平滑微调追踪算法，避免视野拉近后的画面剧烈抖动与眩晕。")));
+
+            currentItems.add(new ToggleItem("枪械空仓换弹",
+                    AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD::get,
+                    val -> {
+                        AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD.set(val);
+                        showToast("空仓自动换弹: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("枪械空仓自动换弹 (Auto-Reload)",
+                            "弹药打空后自动换弹，背包无弹药时自动停用。",
+                            "当手持枪械弹匣与枪膛彻底打空至 0 发时，系统自动触发换弹动作；",
+                            "若背包中没有备用子弹，系统自动停止换弹并休眠，避免频繁发起无谓操作与性能开销。")));
+        }
+
+        if (category == ClientEvents.WeaponCategory.BOW || category == ClientEvents.WeaponCategory.OTHER) {
+            String bowHeader = (category == ClientEvents.WeaponCategory.BOW) ? "// 弹道预判 (远程弓弩)" : "// 弹道预判 (全局预设)";
+            currentItems.add(new HeaderItem(bowHeader));
+
+            currentItems.add(new ToggleItem("提前量预判",
+                    AutoAttackerConfig.ENABLE_AIM_PREDICT::get,
+                    val -> {
+                        AutoAttackerConfig.ENABLE_AIM_PREDICT.set(val);
+                        showToast("提前量预判: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("提前量预判",
+                            "基于微元动力学的移动目标交会前置计算。",
+                            "根据箭矢飞行速度、重力加速度与目标的运动矢量，解算出未来交会拦截点，并将准星智能抬升与前置偏移。")));
+
+            currentItems.add(new SliderItem("预判权重",
+                    AutoAttackerConfig.AIM_PREDICT_BLEND::get,
+                    val -> AutoAttackerConfig.AIM_PREDICT_BLEND.set(Math.round(val * 100.0) / 100.0),
+                    0.0, 1.0, "%.2f",
+                    makeTooltip("预判混合插值权重",
+                            "本体准星与预判拦截点之间的融合比例。",
+                            "1.00 = 100% 瞄准未来交会预判点（对移动目标命中率最高）；",
+                            "0.00 = 纯瞄准敌人当前物理中心。")));
+
+            currentItems.add(new SliderItem("速度平滑",
+                    AutoAttackerConfig.AIM_PREDICT_SMOOTH::get,
+                    val -> AutoAttackerConfig.AIM_PREDICT_SMOOTH.set(Math.round(val * 100.0) / 100.0),
+                    0.0, 1.0, "%.2f",
+                    makeTooltip("目标速度平滑滤波",
+                            "消除目标急停、摩擦碰撞或受击击退时的瞬时抖动。",
+                            "数值越高滤波越稳定抗抖，数值越低对变向反应越灵敏。")));
+
+            currentItems.add(new SliderItem("最大射程",
+                    AutoAttackerConfig.AIM_PREDICT_MAX_DIST::get,
+                    val -> AutoAttackerConfig.AIM_PREDICT_MAX_DIST.set((double) Math.round(val)),
+                    5.0, 120.0, "%.0f 格",
+                    makeTooltip("远程预判极限距离",
+                            "提前量微元解算的最大作用直线距离（格）。",
+                            "超出此射程的目标停止提前量运算，回退为基础直瞄。")));
+
+            currentItems.add(new ToggleItem("拦截光圈",
+                    AutoAttackerConfig.ENABLE_LEAD_INDICATOR::get,
+                    val -> {
+                        AutoAttackerConfig.ENABLE_LEAD_INDICATOR.set(val);
+                        showToast("拦截光圈: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("拦截指引光圈",
+                            "在世界三维空间中渲染未来拦截落点圆环。",
+                            "直观指示箭矢预计与目标相撞的战术拦截点。")));
+        }
+    }
+
+    private void buildTrajectoryTab() {
+        // =================================================================
+        // Tab 1: 弹道 (落点预测、样式切换、目标标牌、悬浮小窗)
+        // =================================================================
+        Minecraft mc = Minecraft.getInstance();
+        Player player = mc.player;
+        ItemStack held = ClientEvents.getActiveWeapon(player);
+        ClientEvents.WeaponCategory category = ClientEvents.getWeaponCategory(held);
+
+        String predHeader = (category == ClientEvents.WeaponCategory.GUN) ? "// 弹道预测 §8(当前手持枪械为高平直瞄)" :
+                            (category == ClientEvents.WeaponCategory.MELEE) ? "// 弹道预测 §8(当前手持近战兵刃)" : "// 弹道预测 (抛物线模拟)";
+        currentItems.add(new HeaderItem(predHeader));
+
+        if (category == ClientEvents.WeaponCategory.GUN) {
+            currentItems.add(new EmptyNoticeItem("当前手持现代枪械 (高平直瞄0G)，落点预测仅在手持弓弩时生效"));
+        } else if (category == ClientEvents.WeaponCategory.MELEE) {
+            currentItems.add(new EmptyNoticeItem("当前手持近战兵刃，落点预测仅在手持远程弓弩时生效"));
+        }
+
+        currentItems.add(new ToggleItem("落点预测",
+                AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW::get,
+                val -> {
+                    AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW.set(val);
+                    showToast("落点预测: " + (val ? "开启" : "关闭"));
+                },
+                makeTooltip("落点预测",
+                        "实时抛物线前向动力学物理模拟。",
+                        "手持远程武器时，在世界中实时预计算并显示箭矢最终下坠落点方块或命中实体。")));
+
+        currentItems.add(new CycleItem("显示样式",
+                () -> {
+                    AutoAttackerConfig.TrajectoryStyle s = AutoAttackerConfig.TRAJECTORY_STYLE.get();
+                    if (s == AutoAttackerConfig.TrajectoryStyle.HUD_RETICLE) return "2D准星";
+                    if (s == AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN) return "3D光束";
+                    if (s == AutoAttackerConfig.TrajectoryStyle.BOTH) return "双显";
+                    return "关闭";
+                },
+                () -> {
+                    AutoAttackerConfig.TrajectoryStyle cur = AutoAttackerConfig.TRAJECTORY_STYLE.get();
+                    AutoAttackerConfig.TrajectoryStyle next =
+                            (cur == AutoAttackerConfig.TrajectoryStyle.BOTH) ? AutoAttackerConfig.TrajectoryStyle.HUD_RETICLE :
+                            (cur == AutoAttackerConfig.TrajectoryStyle.HUD_RETICLE) ? AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN :
+                            (cur == AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN) ? AutoAttackerConfig.TrajectoryStyle.OFF :
+                            AutoAttackerConfig.TrajectoryStyle.BOTH;
+                    AutoAttackerConfig.TRAJECTORY_STYLE.set(next);
+                    String name = (next == AutoAttackerConfig.TrajectoryStyle.HUD_RETICLE) ? "2D准星" :
+                                  (next == AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN) ? "3D光束" :
+                                  (next == AutoAttackerConfig.TrajectoryStyle.BOTH) ? "双显" : "关闭";
+                    showToast("显示样式: " + name);
+                },
+                makeTooltip("落点显示样式",
+                        "切换抛物线落点的视觉呈现形式。",
+                        "【2D准星】：在最终落点处渲染屏幕平视战术准星；",
+                        "【3D光束】：从玩家手持发射源到落点渲染粒子轨迹链；",
+                        "【双显】：同时开启 2D 准星标记与 3D 轨迹粒子；",
+                        "【关闭】：隐藏所有落点预测画面。")));
+
+        currentItems.add(new ToggleItem("仅手持显示",
+                AutoAttackerConfig.HUD_ONLY_WHEN_HOLDING_BOW::get,
+                val -> {
+                    AutoAttackerConfig.HUD_ONLY_WHEN_HOLDING_BOW.set(val);
+                    showToast("仅手持显示: " + (val ? "开启" : "关闭"));
+                },
+                makeTooltip("仅手持远程武器显示",
+                        "手持感知与视界防遮挡过滤。",
+                        "开启后，仅在主手或副手手持远程弓弩武器时才渲染抛物线；空手、拿剑或工具时自动隐藏，保持战斗视界清爽。")));
+
+        currentItems.add(new HeaderItem("// 目标标牌"));
+
+        currentItems.add(new ToggleItem("距离数值",
+                AutoAttackerConfig.SHOW_DISTANCE::get,
+                val -> {
+                    AutoAttackerConfig.SHOW_DISTANCE.set(val);
+                    showToast("距离显示: " + (val ? "开启" : "关闭"));
+                },
+                makeTooltip("距离数值标牌",
+                        "战术测距仪 HUD 叠加。",
+                        "在当前锁定或瞄准的目标头顶显示精确到 0.1 米的直线距离。")));
+
+        currentItems.add(new ToggleItem("目标血条",
+                AutoAttackerConfig.SHOW_HEALTH_BAR::get,
+                val -> {
+                    AutoAttackerConfig.SHOW_HEALTH_BAR.set(val);
+                    showToast("血条显示: " + (val ? "开启" : "关闭"));
+                },
+                makeTooltip("目标生命条标牌",
+                        "敌人战术血量显示。",
+                        "在锁定目标头顶展示当前生命值与最大生命值比例血条。")));
+
+        currentItems.add(new HeaderItem("// 悬浮小窗"));
+
+        currentItems.add(new ToggleItem("U键小窗",
+                AutoAttackerConfig.ENABLE_DEBUG_OVERLAY::get,
+                val -> {
+                    AutoAttackerConfig.ENABLE_DEBUG_OVERLAY.set(val);
+                    showToast("悬浮小窗: " + (val ? "开启" : "关闭"));
+                },
+                makeTooltip("U键悬浮监视小窗",
+                        "实时弹道参数 HUD 监控窗口。",
+                        "在屏幕左上角显示当前武器初速、重力、飞行时间及蓄力状态等底层物理数据。",
+                        "在游戏中随时按 U 键即可快速切换小窗显隐。")));
+
+        currentItems.add(new ButtonItem("重置小窗位置到左上角", () -> {
+            TacticalDebugPanel.setPosition(12, 36);
+            showToast("小窗位置已重置 (12, 36)");
+        }, makeTooltip("重置小窗坐标", "将悬浮小窗位置重置到默认安全坐标 (X:12, Y:36)。")));
+    }
+
+    private void buildArchiveTab() {
+        // =================================================================
+        // Tab 2: 武器特征档案库 (默认折叠、分页上限防卡顿、字母/时间正倒序排序)
+        // =================================================================
+        Minecraft mc = Minecraft.getInstance();
+        Player player = mc.player;
+        ItemStack held = ClientEvents.getActiveWeapon(player);
+        ClientEvents.WeaponCategory category = ClientEvents.getWeaponCategory(held);
+
+        currentItems.add(new HeaderItem("// 当前手持武器状态"));
+        if (category == ClientEvents.WeaponCategory.GUN) {
+            AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(held);
+            currentItems.add(new HeldWeaponStatusCard(held, profile));
+            final ItemStack finalHeld = held;
+            currentItems.add(new ButtonItem("重置当前枪械档案 (恢复原厂直瞄)", () -> {
+                AutoBallisticsTracker.resetProfile(finalHeld);
+                showToast("当前枪械档案已重置为原厂直瞄");
+                rebuildCurrentTab();
+            }, makeTooltip("枪械原厂重置",
+                    "将当前手持枪械的弹道档案重置为原厂直瞄参数（初速恢复出厂值，重力归零）。",
+                    "保持高平直射，无下坠无仰角。")).withConfirmation("§c再次点击确认恢复原厂直瞄"));
+        } else if (category == ClientEvents.WeaponCategory.BOW) {
+            AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(held);
+            currentItems.add(new HeldWeaponStatusCard(held, profile));
+            final ItemStack finalHeld = held;
+            currentItems.add(new ButtonItem("从当前物品描述重新解析", () -> {
+                AutoBallisticsTracker.reparseTooltip(finalHeld);
+                showToast("已从描述重新解析参数");
+                rebuildCurrentTab();
+            }, makeTooltip("Tooltip 语义反演",
+                    "重新扫描当前手持武器的 Tooltip 文本描述。",
+                    "提取例如 '1.8 Projectile Speed' 或 '0.75 Draw Time' 等模组专属物理属性。")));
+
+            currentItems.add(new ButtonItem("重置当前武器档案 (重新自适应)", () -> {
+                AutoBallisticsTracker.resetProfile(finalHeld);
+                showToast("当前武器档案已重置");
+                rebuildCurrentTab();
+            }, makeTooltip("自适应档案重置",
+                    "从特征库中清除当前手持武器的档案记录。",
+                    "下次射击时，系统将根据箭矢真实飞行轨迹重新自适应学习。")).withConfirmation("§c再次点击确认重置档案"));
+        } else if (category == ClientEvents.WeaponCategory.MELEE) {
+            currentItems.add(new HeldMeleeStatusCard(held));
+        } else {
+            currentItems.add(new EmptyNoticeItem("当前未手持武器 (手持枪械/弓弩/近战时将自动识别)"));
+        }
+
+        // 档案库折叠与条目全景
+        Map<String, AutoBallisticsTracker.BallisticsProfile> cacheEntries = AutoBallisticsTracker.getCacheEntries();
+        int totalEntries = cacheEntries.size();
+
+        currentItems.add(new HeaderItem("// 武器档案库 (已存 " + totalEntries + " 种)"));
+
+        if (!isArchiveExpanded) {
+            // 默认折叠收缩状态 (零多余渲染消耗)
+            currentItems.add(new ButtonItem("▶ 展开武器档案列表 (" + totalEntries + " 种)", () -> {
+                isArchiveExpanded = true;
+                archivePage = 0;
+                rebuildCurrentTab();
+            }, makeTooltip("展开武器档案列表", "展开查看所有已学习的武器档案条目（配有防卡顿分页与多维排序）。")));
+        } else {
+            // 展开状态
+            currentItems.add(new ButtonItem("▼ 折叠武器档案列表", () -> {
+                isArchiveExpanded = false;
+                rebuildCurrentTab();
+            }, makeTooltip("折叠武器档案列表", "收起档案列表，保持控制台精简清爽。")));
+
+            if (cacheEntries.isEmpty()) {
+                currentItems.add(new EmptyNoticeItem("档案库为空 (使用武器时将自动建立档案)"));
+            } else {
+                // 1. 排序控制栏 (依据: 时间/字母, 方向: 倒序/正序)
+                currentItems.add(new SortBarItem(
+                        () -> archiveSortByTime ? "依据: 时间" : "依据: 字母",
+                        () -> {
+                            archiveSortByTime = !archiveSortByTime;
+                            archivePage = 0;
+                            rebuildCurrentTab();
+                        },
+                        makeTooltip("档案排序依据",
+                                "切换武器档案列表的排序维度。",
+                                "【时间】：按武器录入或最近更新时间排序；",
+                                "【字母】：按武器名称拼音/字母排序 (A-Z)。",
+                                "§8(点击切换依据)"),
+                        () -> archiveSortAscending ? "方向: 正序 ↑" : "方向: 倒序 ↓",
+                        () -> {
+                            archiveSortAscending = !archiveSortAscending;
+                            archivePage = 0;
+                            rebuildCurrentTab();
+                        },
+                        makeTooltip("档案排序方向",
+                                "切换正序或倒序排列。",
+                                "【倒序 ↓】：最新录入在最前 / Z 到 A；",
+                                "【正序 ↑】：最早录入在最前 / A 到 Z。",
+                                "§8(点击切换方向)")
+                ));
+
+                // 2. 排序列表条目 (名称预映射计算，避免 O(N log N) 比较时重复创建 ItemStack)
+                List<Map.Entry<String, AutoBallisticsTracker.BallisticsProfile>> entryList = new ArrayList<>(cacheEntries.entrySet());
+                if (archiveSortByTime) {
+                    entryList.sort((e1, e2) -> {
+                        long t1 = e1.getValue().lastUpdated;
+                        long t2 = e2.getValue().lastUpdated;
+                        int cmp = Long.compare(t1, t2);
+                        return archiveSortAscending ? cmp : -cmp; // 倒序 = 较大时间戳在前
+                    });
+                } else {
+                    Map<String, String> nameCache = new HashMap<>(entryList.size());
+                    for (Map.Entry<String, AutoBallisticsTracker.BallisticsProfile> e : entryList) {
+                        nameCache.put(e.getKey(), getReadableWeaponName(e.getKey()));
+                    }
+                    entryList.sort((e1, e2) -> {
+                        String n1 = nameCache.getOrDefault(e1.getKey(), "");
+                        String n2 = nameCache.getOrDefault(e2.getKey(), "");
+                        int cmp = n1.compareToIgnoreCase(n2);
+                        return archiveSortAscending ? cmp : -cmp;
+                    });
+                }
+
+                int maxPages = Math.max(1, (int) Math.ceil((double) entryList.size() / ARCHIVE_PAGE_SIZE));
+                if (archivePage >= maxPages) archivePage = maxPages - 1;
+                if (archivePage < 0) archivePage = 0;
+
+                // 3. 分页控制栏 (若超过 1 页)
+                if (maxPages > 1) {
+                    currentItems.add(new PaginationBarItem(archivePage + 1, maxPages,
+                            () -> {
+                                if (archivePage > 0) {
+                                    archivePage--;
+                                    rebuildCurrentTab();
+                                }
+                            },
+                            () -> {
+                                if (archivePage < maxPages - 1) {
+                                    archivePage++;
+                                    rebuildCurrentTab();
+                                }
+                            }));
+                }
+
+                // 4. 限制只渲染当前页的至多 15 条，杜绝掉帧
+                int startIdx = archivePage * ARCHIVE_PAGE_SIZE;
+                int endIdx = Math.min(startIdx + ARCHIVE_PAGE_SIZE, entryList.size());
+
+                for (int i = startIdx; i < endIdx; i++) {
+                    var entry = entryList.get(i);
+                    String sig = entry.getKey();
+                    AutoBallisticsTracker.BallisticsProfile prof = entry.getValue();
+
+                    currentItems.add(new ProfileArchiveCard(sig, prof, () -> {
+                        AutoBallisticsTracker.removeProfileByKey(sig);
+                        showToast("已删除档案: " + getReadableWeaponName(sig));
+                        rebuildCurrentTab();
+                    }));
+                }
+            }
+        }
+
+        currentItems.add(new HeaderItem("// 全局档案维护"));
+        currentItems.add(new ButtonItem("恢复原厂预设武器档案", () -> {
+            AutoBallisticsTracker.clearAllCache();
+            showToast("已恢复原厂权威预设档案 (16种经典武器)");
+            rebuildCurrentTab();
+        }, makeTooltip("恢复原厂预设", "清空自定义微调记录，并将档案库重置恢复为 16 种经典与主流模组弓弩的原厂权威物理基准。")).withConfirmation("§c§l再次点击确认恢复原厂预设"));
+
+        currentItems.add(new ButtonItem("保存档案库到本地磁盘", () -> {
+            AutoBallisticsTracker.saveToDiskImmediate();
+            showToast("武器档案已持久化到磁盘");
+        }, makeTooltip("保存到磁盘", "强制立即将当前内存中的武器档案库写入 combathelper_ballistics.json 文件。")));
+    }
+
+    private void buildListTab() {
+        // =================================================================
+        // Tab 3: 名单管理 (4分段直切、一键录入、单项红X删除、多维排序)
+        // =================================================================
+        Minecraft mc = Minecraft.getInstance();
+        Player player = mc.player;
+        ItemStack held = player != null ? player.getMainHandItem() : ItemStack.EMPTY;
+
+        // 1. 顶部 4 分段直选导航栏
+        currentItems.add(new HeaderItem("// 名单分类"));
+        String[] categoryLabels = {
+                "免重力 (" + AutoAttackerConfig.ZERO_GRAVITY_BOWS.get().size() + ")",
+                "黑名单 (" + AutoAttackerConfig.BLACKLIST.get().size() + ")",
+                "白名单 (" + AutoAttackerConfig.WHITELIST.get().size() + ")",
+                "排除 (" + AutoAttackerConfig.ENTITY_BLACKLIST.get().size() + ")"
+        };
+        currentItems.add(new SegmentedBarItem(categoryLabels, () -> activeListCategory, cat -> {
+            activeListCategory = cat;
+            rebuildCurrentTab();
+        }));
+
+        // 2. 极简快捷录入行 (直观明了)
+        currentItems.add(new HeaderItem("// 快捷录入"));
+        if (activeListCategory < 3) {
+            // 物品类名单 (免重力弓 / 攻击黑名单 / 攻击白名单)
+            if (!held.isEmpty()) {
+                Item item = held.getItem();
+                ResourceLocation loc = ForgeRegistries.ITEMS.getKey(item);
+                String itemStr = loc != null ? loc.toString() : "";
+                List<String> curList = new ArrayList<>(getListConfig(activeListCategory).get());
+                boolean contains = curList.contains(itemStr);
+
+                currentItems.add(new QuickItemActionCard(held, contains,
+                        LIST_CATEGORY_NAMES[activeListCategory], () -> {
+                    if (contains) {
+                        curList.remove(itemStr);
+                        showToast("已移出: " + held.getHoverName().getString());
+                    } else {
+                        curList.add(itemStr);
+                        showToast("已添加: " + held.getHoverName().getString());
+                    }
+                    getListConfig(activeListCategory).set(curList);
+                    AutoAttackerConfig.refreshLists();
+                    AutoAttackerConfig.saveConfig();
+                    rebuildCurrentTab();
+                }));
+            } else {
+                currentItems.add(new EmptyNoticeItem("主手未持有物品 (手持物品即可一键录入)"));
+            }
+        } else {
+            // 实体类名单 (排除实体)
+            LivingEntity target = ClientEvents.getCurrentTarget();
+            if (target != null && target.isAlive()) {
+                ResourceLocation eloc = ForgeRegistries.ENTITY_TYPES.getKey(target.getType());
+                String entityStr = eloc != null ? eloc.toString() : "";
+                List<String> curList = new ArrayList<>(AutoAttackerConfig.ENTITY_BLACKLIST.get());
+                boolean contains = curList.contains(entityStr);
+
+                currentItems.add(new QuickEntityActionCard(target, contains, () -> {
+                    if (contains) {
+                        curList.remove(entityStr);
+                        showToast("已移出排除: " + target.getName().getString());
+                    } else {
+                        curList.add(entityStr);
+                        showToast("已加入排除: " + target.getName().getString());
+                    }
+                    AutoAttackerConfig.ENTITY_BLACKLIST.set(curList);
+                    AutoAttackerConfig.refreshLists();
+                    AutoAttackerConfig.saveConfig();
+                    rebuildCurrentTab();
+                }));
+            } else {
+                currentItems.add(new EmptyNoticeItem("准星未锁定实体 (瞄准目标即可一键排除)"));
+            }
+        }
+
+        // 3. 名单全景条目与排序
+        List<String> entries = new ArrayList<>(getListConfig(activeListCategory).get());
+        currentItems.add(new HeaderItem("// " + LIST_CATEGORY_NAMES[activeListCategory] + " 条目 (" + entries.size() + " 项，点击红 X 删除)"));
+
+        if (entries.isEmpty()) {
+            currentItems.add(new EmptyNoticeItem("该名单为空"));
+        } else {
+            boolean isEntity = (activeListCategory == 3);
+
+            // 排序控制栏
+            currentItems.add(new SortBarItem(
+                    () -> listSortByTime ? "依据: 录入时间" : "依据: 名称字母",
+                    () -> {
+                        listSortByTime = !listSortByTime;
+                        rebuildCurrentTab();
+                    },
+                    makeTooltip("名单排序依据",
+                            "切换名单条目列表的排序维度。",
+                            "【录入时间】：按加入名单的先后次序排序；",
+                            "【名称字母】：按显示名称或注册 ID 字母排序 (A-Z)。",
+                            "§8(点击切换依据)"),
+                    () -> listSortAscending ? "方向: 正序 ↑" : "方向: 倒序 ↓",
+                    () -> {
+                        listSortAscending = !listSortAscending;
+                        rebuildCurrentTab();
+                    },
+                    makeTooltip("名单排序方向",
+                            "切换排序方向。",
+                            "【倒序 ↓】：最新加入在最前 / Z 到 A；",
+                            "【正序 ↑】：最早加入在最前 / A 到 Z。",
+                            "§8(点击切换方向)")
+            ));
+
+            // 记录原始索引作为录入先后依据
+            Map<String, Integer> originIndices = new HashMap<>();
+            for (int i = 0; i < entries.size(); i++) {
+                originIndices.put(entries.get(i), i);
+            }
+
+            if (listSortByTime) {
+                entries.sort((id1, id2) -> {
+                    int idx1 = originIndices.getOrDefault(id1, 0);
+                    int idx2 = originIndices.getOrDefault(id2, 0);
+                    int cmp = Integer.compare(idx1, idx2);
+                    return listSortAscending ? cmp : -cmp; // 倒序 = 较大索引(最新)在前
+                });
+            } else {
+                Map<String, String> nameCache = new HashMap<>(entries.size());
+                for (String rawId : entries) {
+                    nameCache.put(rawId, getReadableEntryName(rawId, isEntity));
+                }
+                entries.sort((id1, id2) -> {
+                    String n1 = nameCache.getOrDefault(id1, "");
+                    String n2 = nameCache.getOrDefault(id2, "");
+                    int cmp = n1.compareToIgnoreCase(n2);
+                    return listSortAscending ? cmp : -cmp;
+                });
+            }
+
+            for (String rawId : entries) {
+                currentItems.add(new ListEntryCard(rawId, isEntity, () -> {
+                    List<String> list = new ArrayList<>(getListConfig(activeListCategory).get());
+                    list.remove(rawId);
+                    getListConfig(activeListCategory).set(list);
+                    AutoAttackerConfig.refreshLists();
+                    AutoAttackerConfig.saveConfig();
+                    showToast("已删除: " + rawId);
+                    rebuildCurrentTab();
+                }));
+            }
+        }
+
+        // 4. 底部并排紧凑维护栏
+        currentItems.add(new HeaderItem("// 名单维护"));
+        currentItems.add(new DualButtonItem(
+                "清空当前名单", () -> {
+            getListConfig(activeListCategory).set(List.of());
+            AutoAttackerConfig.refreshLists();
+            AutoAttackerConfig.saveConfig();
+            showToast(LIST_CATEGORY_NAMES[activeListCategory] + " 已清空");
+            rebuildCurrentTab();
+        },
+                "恢复默认名单", () -> {
+            AutoAttackerConfig.ZERO_GRAVITY_BOWS.set(List.of("extrabotany:failnaught"));
+            AutoAttackerConfig.BLACKLIST.set(List.of());
+            AutoAttackerConfig.WHITELIST.set(List.of());
+            AutoAttackerConfig.ENTITY_BLACKLIST.set(List.of("minecraft:villager", "minecraft:armor_stand"));
+            AutoAttackerConfig.refreshLists();
+            AutoAttackerConfig.saveConfig();
+            showToast("已恢复全部名单为默认");
+            rebuildCurrentTab();
+        }
+        ).withConfirmation(true, true));
     }
 
     private ForgeConfigSpec.ConfigValue<List<? extends String>> getListConfig(int category) {
