@@ -81,9 +81,15 @@ public final class FirearmAdapter {
     private static Method taczGetHeadShotMultiplierWithAttachmentMethod = null;
     private static Class<?> taczAttachmentTypeClass = null;
     private static Method taczGetAttachmentMethod = null;
+    private static Method taczAttachmentTypeValuesMethod = null;
 
     private static Class<?> taczIGunOperatorClass = null;
     private static Method taczFromLivingEntityMethod = null;
+    private static Method taczReloadMethod = null;
+
+    private static Method taczGetClientGunIndexMethod = null;
+    private static Class<?> taczClientGunIndexClass = null;
+    private static Method taczClientGunIndexGetNameMethod = null;
     private static Method taczGetSynIsAimingMethod = null;
     private static Method taczGetSynIsBoltingMethod = null;
     private static Method taczGetSynReloadStateMethod = null;
@@ -131,6 +137,7 @@ public final class FirearmAdapter {
     private static Method pbStateIsPreparingReloadMethod = null;
     private static Method pbResolveSlotIndexMethod = null;
     private static Field pbReloadKeyField = null;
+    private static Method pbLazyGetMethod = null;
 
     // ==========================================
     // 3. Just Enough Guns (JEG) 反射句柄缓存
@@ -139,6 +146,7 @@ public final class FirearmAdapter {
     private static boolean jegAvailable = false;
     private static Class<?> jegGunItemClass = null;
     private static Class<?> jegGunClass = null;
+    private static Method jegFireModeGetIdMethod = null;
     private static Method jegGetModifiedGunMethod = null;
     private static Method jegFindAmmoStackMethod = null;
     private static Method jegGetProjectileMethod = null;
@@ -603,9 +611,14 @@ public final class FirearmAdapter {
                                     if (fmObj != null) {
                                         String fmStr = "";
                                         try {
-                                            Method getIdMethod = fmObj.getClass().getMethod("getId");
-                                            Object idObj = getIdMethod.invoke(fmObj);
-                                            if (idObj != null) fmStr = idObj.toString().toLowerCase(Locale.ROOT);
+                                            if (jegFireModeGetIdMethod != null) {
+                                                Object idObj = jegFireModeGetIdMethod.invoke(fmObj);
+                                                if (idObj != null) fmStr = idObj.toString().toLowerCase(Locale.ROOT);
+                                            } else {
+                                                Method getIdMethod = fmObj.getClass().getMethod("getId");
+                                                Object idObj = getIdMethod.invoke(fmObj);
+                                                if (idObj != null) fmStr = idObj.toString().toLowerCase(Locale.ROOT);
+                                            }
                                         } catch (Throwable t) {
                                             fmStr = fmObj.toString().toLowerCase(Locale.ROOT);
                                         }
@@ -962,7 +975,7 @@ public final class FirearmAdapter {
                 ResourceLocation ammoRes = (status.ammoId != null && !status.ammoId.isEmpty()) ? ResourceLocation.tryParse(status.ammoId) : null;
 
                 for (ItemStack invStack : player.getInventory().items) {
-                    if (invStack.isEmpty()) continue;
+                    if (invStack.isEmpty() || invStack.getCount() <= 0) continue;
 
                     // 检测是否为匹配子弹 (IAmmo)
                     if (taczIAmmoClass != null && taczIAmmoClass.isInstance(invStack.getItem())) {
@@ -973,11 +986,11 @@ public final class FirearmAdapter {
                         } catch (Throwable ignored) {}
                     }
 
-                    // 检测是否为匹配弹药箱 (IAmmoBox)
+                    // 检测是否为匹配弹药箱 (IAmmoBox)，严格校验余弹数 > 0
                     if (taczIAmmoBoxClass != null && taczIAmmoBoxClass.isInstance(invStack.getItem())) {
                         try {
                             if (taczIsAmmoBoxOfGunMethod != null && (boolean) taczIsAmmoBoxOfGunMethod.invoke(invStack.getItem(), stack, invStack)) {
-                                int count = (taczGetAmmoCountMethod != null) ? (int) taczGetAmmoCountMethod.invoke(invStack.getItem(), invStack) : 1;
+                                int count = (taczGetAmmoCountMethod != null) ? (int) taczGetAmmoCountMethod.invoke(invStack.getItem(), invStack) : invStack.getCount();
                                 if (count > 0) return true;
                             }
                         } catch (Throwable ignored) {}
@@ -1015,7 +1028,7 @@ public final class FirearmAdapter {
                         for (Object ammoItemObj : collection) {
                             if (ammoItemObj instanceof Item ammoItem) {
                                 for (ItemStack invStack : player.getInventory().items) {
-                                    if (!invStack.isEmpty() && invStack.getItem() == ammoItem) {
+                                    if (!invStack.isEmpty() && invStack.getCount() > 0 && invStack.getItem() == ammoItem) {
                                         return true;
                                     }
                                 }
@@ -1026,7 +1039,7 @@ public final class FirearmAdapter {
             }
             // 退避兜底：扫描背包中是否有 Point Blank 弹药物品
             for (ItemStack invStack : player.getInventory().items) {
-                if (!invStack.isEmpty()) {
+                if (!invStack.isEmpty() && invStack.getCount() > 0) {
                     ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
                     if (itemRes != null && itemRes.getNamespace().equalsIgnoreCase("pointblank")) {
                         String p = itemRes.getPath();
@@ -1195,11 +1208,10 @@ public final class FirearmAdapter {
                 } catch (Throwable ignored) {}
 
                 try {
-                    if (taczFromLivingEntityMethod != null && taczIGunOperatorClass != null) {
+                    if (taczFromLivingEntityMethod != null && taczReloadMethod != null) {
                         Object operator = taczFromLivingEntityMethod.invoke(null, player);
                         if (operator != null) {
-                            Method reloadMethod = taczIGunOperatorClass.getMethod("reload");
-                            reloadMethod.invoke(operator);
+                            taczReloadMethod.invoke(operator);
                             return true;
                         }
                     }
@@ -1226,8 +1238,13 @@ public final class FirearmAdapter {
                 try {
                     Object lazyObj = pbReloadKeyField.get(null);
                     if (lazyObj != null) {
-                        Method getMethod = lazyObj.getClass().getMethod("get");
-                        KeyMapping reloadKey = (KeyMapping) getMethod.invoke(lazyObj);
+                        KeyMapping reloadKey = null;
+                        if (pbLazyGetMethod != null) {
+                            reloadKey = (KeyMapping) pbLazyGetMethod.invoke(lazyObj);
+                        } else {
+                            Method getMethod = lazyObj.getClass().getMethod("get");
+                            reloadKey = (KeyMapping) getMethod.invoke(lazyObj);
+                        }
                         if (reloadKey != null) {
                             KeyMapping.click(reloadKey.getKey());
                             triggered = true;
@@ -1566,19 +1583,21 @@ public final class FirearmAdapter {
         // 1. TACZ 配件提取
         if (isTaczGun(stack)) {
             initTaczReflection();
-            if (taczAvailable && taczGetIGunOrNullMethod != null && taczGetAttachmentMethod != null && taczAttachmentTypeClass != null) {
+            if (taczAvailable && taczGetIGunOrNullMethod != null && taczGetAttachmentMethod != null && taczAttachmentTypeValuesMethod != null) {
                 try {
                     Object iGun = taczGetIGunOrNullMethod.invoke(null, stack);
                     if (iGun != null) {
-                        Object[] types = (Object[]) taczAttachmentTypeClass.getMethod("values").invoke(null);
-                        for (Object type : types) {
-                            if ("NONE".equals(type.toString())) continue;
-                            ItemStack attachStack = (ItemStack) taczGetAttachmentMethod.invoke(iGun, stack, type);
-                            if (attachStack != null && !attachStack.isEmpty()) {
-                                String name = attachStack.getHoverName().getString();
-                                name = name.replaceAll("^\\[.*?\\]\\s*", "").trim();
-                                if (!name.isEmpty() && !list.contains(name)) {
-                                    list.add(name);
+                        Object[] types = (Object[]) taczAttachmentTypeValuesMethod.invoke(null);
+                        if (types != null) {
+                            for (Object type : types) {
+                                if ("NONE".equals(type.toString())) continue;
+                                ItemStack attachStack = (ItemStack) taczGetAttachmentMethod.invoke(iGun, stack, type);
+                                if (attachStack != null && !attachStack.isEmpty()) {
+                                    String name = attachStack.getHoverName().getString();
+                                    name = name.replaceAll("^\\[.*?\\]\\s*", "").trim();
+                                    if (!name.isEmpty() && !list.contains(name)) {
+                                        list.add(name);
+                                    }
                                 }
                             }
                         }
@@ -1656,13 +1675,12 @@ public final class FirearmAdapter {
 
             // 3. 通过 TACZ 客户端索引反射读取
             initTaczReflection();
-            if (taczAvailable && taczTimelessAPIClass != null) {
+            if (taczAvailable && taczGetClientGunIndexMethod != null && taczClientGunIndexGetNameMethod != null) {
                 try {
-                    Method getClientIndex = taczTimelessAPIClass.getMethod("getClientGunIndex", ResourceLocation.class);
-                    Object clientOpt = getClientIndex.invoke(null, res);
+                    Object clientOpt = taczGetClientGunIndexMethod.invoke(null, res);
                     if (clientOpt instanceof Optional<?> opt && opt.isPresent()) {
-                        Method getNameMethod = opt.get().getClass().getMethod("getName");
-                        String nameKey = (String) getNameMethod.invoke(opt.get());
+                        Object clientIndex = opt.get();
+                        String nameKey = (String) taczClientGunIndexGetNameMethod.invoke(clientIndex);
                         if (nameKey != null && !nameKey.isEmpty()) {
                             String nameStr = net.minecraft.network.chat.Component.translatable(nameKey).getString();
                             if (!nameStr.equals(nameKey)) {
@@ -1765,10 +1783,20 @@ public final class FirearmAdapter {
             try {
                 taczAttachmentTypeClass = Class.forName("com.tacz.guns.api.item.attachment.AttachmentType");
                 taczGetAttachmentMethod = taczIGunClass.getMethod("getAttachment", ItemStack.class, taczAttachmentTypeClass);
+                taczAttachmentTypeValuesMethod = taczAttachmentTypeClass.getMethod("values");
+            } catch (Throwable ignored) {}
+
+            try {
+                taczGetClientGunIndexMethod = taczTimelessAPIClass.getMethod("getClientGunIndex", ResourceLocation.class);
+                taczClientGunIndexClass = Class.forName("com.tacz.guns.resource.index.ClientGunIndex");
+                taczClientGunIndexGetNameMethod = taczClientGunIndexClass.getMethod("getName");
             } catch (Throwable ignored) {}
 
             taczIGunOperatorClass = Class.forName("com.tacz.guns.api.entity.IGunOperator");
             taczFromLivingEntityMethod = taczIGunOperatorClass.getMethod("fromLivingEntity", LivingEntity.class);
+            try {
+                taczReloadMethod = taczIGunOperatorClass.getMethod("reload");
+            } catch (Throwable ignored) {}
             taczGetSynIsAimingMethod = taczIGunOperatorClass.getMethod("getSynIsAiming");
             taczGetSynIsBoltingMethod = taczIGunOperatorClass.getMethod("getSynIsBolting");
             taczGetSynReloadStateMethod = taczIGunOperatorClass.getMethod("getSynReloadState");
@@ -1862,6 +1890,12 @@ public final class FirearmAdapter {
             try {
                 Class<?> eventHandler = Class.forName("com.vicmatskiv.pointblank.client.ClientEventHandler");
                 pbReloadKeyField = eventHandler.getField("RELOAD_KEY");
+                if (pbReloadKeyField != null) {
+                    Class<?> type = pbReloadKeyField.getType();
+                    try {
+                        pbLazyGetMethod = type.getMethod("get");
+                    } catch (Throwable ignored) {}
+                }
             } catch (Throwable ignored) {}
             pbAvailable = true;
         } catch (Throwable ignored) {
@@ -1887,6 +1921,10 @@ public final class FirearmAdapter {
                 Class<?> genClass = Class.forName("ttv.migami.jeg.common.Gun$General");
                 jegGenGetFireModeMethod = genClass.getMethod("getFireMode");
                 jegGenGetRateMethod = genClass.getMethod("getRate");
+                try {
+                    Class<?> fmClass = Class.forName("ttv.migami.jeg.common.Gun$FireMode");
+                    jegFireModeGetIdMethod = fmClass.getMethod("getId");
+                } catch (Throwable ignored) {}
                 try {
                     jegGenGetMaxHoldFireMethod = genClass.getMethod("getMaxHoldFire");
                 } catch (Throwable ignored) {}
