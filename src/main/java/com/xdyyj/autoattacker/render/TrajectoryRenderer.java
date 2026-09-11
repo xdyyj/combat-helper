@@ -97,14 +97,26 @@ public final class TrajectoryRenderer {
             Camera camera = event.getCamera();
             float partialTick = event.getPartialTick();
             Vec3 start = player.getEyePosition(partialTick).add(player.getViewVector(partialTick).scale(0.12D));
-            Vec3 launchDirection = applyPitchOffset(player.getViewVector(partialTick), profile.pitchOffsetDegrees);
+
+            Vec3 launchDirection;
+            if (!mc.options.getCameraType().isFirstPerson()) {
+                Vec3 camPos = camera.getPosition();
+                Vec3 camForward = Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize();
+                Vec3 camEnd = camPos.add(camForward.scale(128.0D));
+                SegmentImpact camImpact = findNearestImpact(mc, player, camPos, camEnd, lockedTarget);
+                Vec3 targetAimPoint = (camImpact != null && camImpact.location != null) ? camImpact.location : camPos.add(camForward.scale(96.0D));
+                Vec3 convergedLaunchDir = targetAimPoint.subtract(start).normalize();
+                launchDirection = applyPitchOffset(convergedLaunchDir, profile.pitchOffsetDegrees);
+            } else {
+                launchDirection = applyPitchOffset(player.getViewVector(partialTick), profile.pitchOffsetDegrees);
+            }
 
             if (launchDirection.lengthSqr() >= 1.0E-8D) {
                 double currentSpeed = calculateCurrentSpeed(player, weaponStack, profile);
                 double simSpeed = (currentSpeed > 0.08D) ? currentSpeed : profile.speed;
 
                 // 纯净模拟微元轨迹
-                SimResult sim = runSimulation(mc, player, start, launchDirection, simSpeed, profile.gravity, profile.drag, lockedTarget);
+                SimResult sim = runSimulation(mc, player, start, launchDirection, simSpeed, profile.gravity, profile.drag, profile.waterDrag, lockedTarget);
 
                 // 计算屏幕空间投影
                 ProjectedPoint projected = projectToScreen(camera, sim.endPoint, mc);
@@ -404,6 +416,13 @@ public final class TrajectoryRenderer {
 
         double totalDistance = physStart.distanceTo(endPoint);
         double convergeDistance = Math.min(totalDistance, 10.0D);
+
+        if (player.isInWater() || totalDistance < 6.0D) {
+            float distScale = (float) Mth.clamp(totalDistance / 6.0D, 0.15D, 1.0D);
+            handOffset = handOffset.scale(distScale);
+            convergeDistance = Math.max(0.5D, totalDistance * 0.6D);
+        }
+
         if (convergeDistance < 1.0E-4D) convergeDistance = 1.0D;
 
         List<Vec3> visualPoints = new ArrayList<>(physicalPoints.size());
@@ -683,7 +702,7 @@ public final class TrajectoryRenderer {
     // =========================================================================
 
     private static SimResult runSimulation(Minecraft mc, Player player, Vec3 start, Vec3 launchDirection,
-                                           double speed, double gravity, double drag, LivingEntity lockedTarget) {
+                                           double speed, double gravity, double drag, double waterDrag, LivingEntity lockedTarget) {
         Vec3 velocity = launchDirection.normalize().scale(speed);
         double maxLength = MAX_PREVIEW_DISTANCE;
         Vec3 position = start;
@@ -737,7 +756,7 @@ public final class TrajectoryRenderer {
                 }
             }
 
-            double currentDrag = lastIsWater ? 0.60D : drag;
+            double currentDrag = lastIsWater ? waterDrag : drag;
             double substepDrag = Math.pow(currentDrag, SUBSTEP);
             velocity = velocity.scale(substepDrag).add(0.0D, -gravity * SUBSTEP, 0.0D);
         }
@@ -1035,12 +1054,12 @@ public final class TrajectoryRenderer {
         if (ClientEvents.isBow(stack)) {
             AutoBallisticsTracker.BallisticsProfile learned = AutoBallisticsTracker.getProfile(stack);
             if (learned != null) {
-                return new ProjectileProfile(learned.speed, learned.gravity, learned.drag, 0.0D, !(stack.getItem() instanceof CrossbowItem));
+                return new ProjectileProfile(learned.speed, learned.gravity, learned.drag, learned.waterDrag > 0 ? learned.waterDrag : 0.60D, 0.0D, !(stack.getItem() instanceof CrossbowItem));
             }
             if (stack.is(Items.CROSSBOW)) {
-                return new ProjectileProfile(3.15D, 0.05D, 0.99D, 0.0D, false);
+                return new ProjectileProfile(3.15D, 0.05D, 0.99D, 0.60D, 0.0D, false);
             }
-            return new ProjectileProfile(3.0D, 0.05D, 0.99D, 0.0D, true);
+            return new ProjectileProfile(3.0D, 0.05D, 0.99D, 0.60D, 0.0D, true);
         }
 
         return null;
@@ -1116,7 +1135,7 @@ public final class TrajectoryRenderer {
         public long timestamp = 0L;
     }
 
-    private record ProjectileProfile(double speed, double gravity, double drag, double pitchOffsetDegrees, boolean isBow) {}
+    private record ProjectileProfile(double speed, double gravity, double drag, double waterDrag, double pitchOffsetDegrees, boolean isBow) {}
 
     public enum ImpactType {
         NONE,

@@ -1304,10 +1304,24 @@ public class ClientEvents {
             return new PredictedAim(new Vec3(futureX, futureY, futureZ), straightYaw, straightPitch, flightTime);
         }
 
+        ItemStack bowStack = getHeldBow(player);
+        boolean isHoldingBow = !bowStack.isEmpty();
+        AutoBallisticsTracker.BallisticsProfile profile = isHoldingBow ? AutoBallisticsTracker.getProfile(bowStack) : null;
+        double drag = profile != null ? profile.drag : 0.99D;
+        double waterDrag = profile != null ? profile.waterDrag : 0.60D;
+
         boolean isMoving = (effectiveVel.x * effectiveVel.x + effectiveVel.y * effectiveVel.y + effectiveVel.z * effectiveVel.z) > 0.0004;
         if (!isMoving) {
-            AutoBallisticsTracker.TrajectorySolution staticTraj = AutoBallisticsTracker.solveTrajectory(player.level(), eye, baseAimPoint, speed, gravity);
-            float staticPitch = (staticTraj != null && staticTraj.reachable) ? staticTraj.pitchDeg : baseDirectPitch;
+            AutoBallisticsTracker.TrajectorySolution staticTraj = AutoBallisticsTracker.solveTrajectory(player.level(), eye, baseAimPoint, speed, gravity, drag, waterDrag);
+            float staticPitch;
+            if (staticTraj != null && staticTraj.reachable) {
+                staticPitch = staticTraj.pitchDeg;
+            } else if (player.isInWater()) {
+                staticPitch = baseDirectPitch;
+                TacticalDebugPanel.setStatus("超出水下有效射程 [不可达]");
+            } else {
+                staticPitch = baseDirectPitch;
+            }
             double staticFlight = (staticTraj != null) ? staticTraj.flightTicks : (baseHorizDist / Math.max(speed, 0.5D));
             return new PredictedAim(baseAimPoint, baseDirectYaw, staticPitch, staticFlight);
         }
@@ -1318,7 +1332,7 @@ public class ClientEvents {
         double maxTicks = Math.min(60.0D, maxDist * 1.5D);
 
         for (int i = 0; i < 3; i++) {
-            bestTraj = AutoBallisticsTracker.solveTrajectory(player.level(), eye, targetPoint, speed, gravity);
+            bestTraj = AutoBallisticsTracker.solveTrajectory(player.level(), eye, targetPoint, speed, gravity, drag, waterDrag);
             double time;
             if (bestTraj != null && bestTraj.reachable) {
                 time = Mth.clamp(bestTraj.flightTicks, 0.0D, maxTicks);
@@ -1359,6 +1373,10 @@ public class ClientEvents {
         float targetPitch;
         if (bestTraj != null && bestTraj.reachable) {
             targetPitch = bestTraj.pitchDeg;
+        } else if (player.isInWater()) {
+            float directPitch = (float) -(Mth.atan2(targetPoint.y - eye.y, Math.max(0.01, horizDist)) * (180D / Math.PI));
+            targetPitch = directPitch - (float) Math.min(3.0, horizDist * gravity * 1.0);
+            TacticalDebugPanel.setStatus("水下目标超出有效物理射程 [不可达]");
         } else if (horizDist < 0.2D || gravity <= 1.0E-6D) {
             targetPitch = (float) -(Mth.atan2(targetPoint.y - eye.y, Math.max(0.01, horizDist)) * (180D / Math.PI));
         } else {
