@@ -971,26 +971,27 @@ public final class FirearmAdapter {
                 }
 
                 // 1.2 穿透检测玩家背包：针对 IAmmo 与 IAmmoBox (弹药箱) 精准识别
-                GunStatus status = getGunStatus(stack);
-                ResourceLocation ammoRes = (status.ammoId != null && !status.ammoId.isEmpty()) ? ResourceLocation.tryParse(status.ammoId) : null;
+                ResourceLocation ammoRes = getTaczAmmoId(stack);
 
                 for (ItemStack invStack : player.getInventory().items) {
                     if (invStack.isEmpty() || invStack.getCount() <= 0) continue;
 
+                    Item item = invStack.getItem();
+
                     // 检测是否为匹配子弹 (IAmmo)
-                    if (taczIAmmoClass != null && taczIAmmoClass.isInstance(invStack.getItem())) {
+                    if (taczIAmmoClass != null && taczIAmmoClass.isInstance(item)) {
                         try {
-                            if (taczIsAmmoOfGunMethod != null && (boolean) taczIsAmmoOfGunMethod.invoke(invStack.getItem(), stack, invStack)) {
+                            if (taczIsAmmoOfGunMethod != null && (boolean) taczIsAmmoOfGunMethod.invoke(item, stack, invStack)) {
                                 return true;
                             }
                         } catch (Throwable ignored) {}
                     }
 
                     // 检测是否为匹配弹药箱 (IAmmoBox)，严格校验余弹数 > 0
-                    if (taczIAmmoBoxClass != null && taczIAmmoBoxClass.isInstance(invStack.getItem())) {
+                    if (taczIAmmoBoxClass != null && taczIAmmoBoxClass.isInstance(item)) {
                         try {
-                            if (taczIsAmmoBoxOfGunMethod != null && (boolean) taczIsAmmoBoxOfGunMethod.invoke(invStack.getItem(), stack, invStack)) {
-                                int count = (taczGetAmmoCountMethod != null) ? (int) taczGetAmmoCountMethod.invoke(invStack.getItem(), invStack) : invStack.getCount();
+                            if (taczIsAmmoBoxOfGunMethod != null && (boolean) taczIsAmmoBoxOfGunMethod.invoke(item, stack, invStack)) {
+                                int count = (taczGetAmmoCountMethod != null) ? (int) taczGetAmmoCountMethod.invoke(item, invStack) : invStack.getCount();
                                 if (count > 0) return true;
                             }
                         } catch (Throwable ignored) {}
@@ -998,7 +999,7 @@ public final class FirearmAdapter {
 
                     // 注册名兜底匹配
                     if (ammoRes != null) {
-                        ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
+                        ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(item);
                         if (ammoRes.equals(itemRes)) return true;
                     }
                 }
@@ -1147,15 +1148,18 @@ public final class FirearmAdapter {
         }
 
         // 5. CGM / 通用枪械退避方案：优先根据 ammoId 匹配，再扫描背包
-        GunStatus status = getGunStatus(stack);
-        if (status.ammoId != null && !status.ammoId.isEmpty()) {
-            ResourceLocation ammoRes = ResourceLocation.tryParse(status.ammoId);
-            if (ammoRes != null) {
-                for (ItemStack invStack : player.getInventory().items) {
-                    if (!invStack.isEmpty()) {
-                        ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
-                        if (ammoRes.equals(itemRes)) {
-                            return true;
+        CompoundTag tag = stack.getTag();
+        if (tag != null) {
+            String ammoIdStr = tag.contains("AmmoId") ? tag.getString("AmmoId") : (tag.contains("ammoId") ? tag.getString("ammoId") : null);
+            if (ammoIdStr != null && !ammoIdStr.isEmpty()) {
+                ResourceLocation ammoRes = ResourceLocation.tryParse(ammoIdStr);
+                if (ammoRes != null) {
+                    for (ItemStack invStack : player.getInventory().items) {
+                        if (!invStack.isEmpty()) {
+                            ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
+                            if (ammoRes.equals(itemRes)) {
+                                return true;
+                            }
                         }
                     }
                 }
@@ -1178,6 +1182,31 @@ public final class FirearmAdapter {
         }
 
         return false;
+    }
+
+    private static ResourceLocation getTaczAmmoId(ItemStack stack) {
+        if (!taczAvailable || taczGetIGunOrNullMethod == null || taczGetGunIdMethod == null || taczGetCommonGunIndexMethod == null) {
+            return null;
+        }
+        try {
+            Object iGunObj = taczGetIGunOrNullMethod.invoke(null, stack);
+            if (iGunObj != null) {
+                ResourceLocation gunId = (ResourceLocation) taczGetGunIdMethod.invoke(iGunObj, stack);
+                if (gunId != null) {
+                    Object gunIndexOpt = taczGetCommonGunIndexMethod.invoke(null, gunId);
+                    if (gunIndexOpt instanceof Optional<?> opt && opt.isPresent()) {
+                        Object gunIndex = opt.get();
+                        if (taczGetGunDataMethod != null) {
+                            Object gunData = taczGetGunDataMethod.invoke(gunIndex);
+                            if (gunData != null && taczGetAmmoIdMethod != null) {
+                                return (ResourceLocation) taczGetAmmoIdMethod.invoke(gunData);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     /**
