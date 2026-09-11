@@ -17,10 +17,12 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.util.Mth;
+import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.client.event.InputEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.event.level.LevelEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagKey;
@@ -132,6 +134,33 @@ public class ClientEvents {
         mouseDeflectionPitch = 0f;
         for (int i = 0; i < VEL_SAMPLE_CAP; i++) {
             velSamples[i] = Vec3.ZERO;
+        }
+    }
+
+    public void clearSessionState() {
+        this.currentTarget = null;
+        this.autoLockHoverTarget = null;
+        this.autoLockHoverTicks = 0;
+        this.lastTrackedTarget = null;
+        this.lastAutoReloadItem = ItemStack.EMPTY;
+        lastCheckedItem = ItemStack.EMPTY;
+        staticCurrentTarget = null;
+        staticSmoothedTargetVelocity = Vec3.ZERO;
+        staticLastPredictedAim = null;
+        staticLastPredictedYaw = 0.0f;
+        resetTargetTracking();
+        AutoBallisticsTracker.clearTransientReferences();
+    }
+
+    @SubscribeEvent
+    public void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
+        clearSessionState();
+    }
+
+    @SubscribeEvent
+    public void onLevelUnload(LevelEvent.Unload event) {
+        if (event.getLevel().isClientSide()) {
+            clearSessionState();
         }
     }
 
