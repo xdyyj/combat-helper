@@ -220,7 +220,14 @@ public class ClientEvents {
 
     @SubscribeEvent
     public void onRenderLevelStage(RenderLevelStageEvent event) {
-        // 对标 camera-lock-on: 严格在 AFTER_ENTITIES 阶段绘制实体战术框与抛物线
+        onRenderWorldLast(event);
+    }
+
+    /**
+     * Level world rendering stage event subscriber (formerly onRenderWorldLast).
+     * Delegates 3D tactical overlays and trajectory preview rendering to TrajectoryRenderer.
+     */
+    public static void onRenderWorldLast(RenderLevelStageEvent event) {
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_ENTITIES) {
             TrajectoryRenderer.onRenderLevelStage(event);
         }

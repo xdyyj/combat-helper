@@ -92,72 +92,83 @@ public final class TrajectoryRenderer {
         boolean trajectoryMasterEnabled = AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW.get() && style != AutoAttackerConfig.TrajectoryStyle.OFF;
         boolean shouldRender3D = trajectoryMasterEnabled && (style == AutoAttackerConfig.TrajectoryStyle.BOTH || style == AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN);
 
-        // 1. 物理弹道模拟与屏幕空间投影计算
+        // 1 & 2. 物理弹道模拟、遥测更新与 3D 轨迹渲染
         if (hasProjectileWeapon && trajectoryMasterEnabled) {
-            Camera camera = event.getCamera();
-            float partialTick = event.getPartialTick();
-            Vec3 start = player.getEyePosition(partialTick).add(player.getViewVector(partialTick).scale(0.12D));
-            Vec3 launchDirection = applyPitchOffset(player.getViewVector(partialTick), profile.pitchOffsetDegrees);
-
-            if (launchDirection.lengthSqr() >= 1.0E-8D) {
-                double currentSpeed = calculateCurrentSpeed(player, weaponStack, profile);
-                double simSpeed = (currentSpeed > 0.08D) ? currentSpeed : profile.speed;
-
-                // 纯净模拟微元轨迹
-                SimResult sim = runSimulation(mc, player, start, launchDirection, simSpeed, profile.gravity, profile.drag, lockedTarget);
-
-                // 计算屏幕空间投影
-                ProjectedPoint projected = projectToScreen(camera, sim.endPoint, mc);
-
-                // 更新共享遥测数据
-                lastTrajectoryInfo.valid = true;
-                lastTrajectoryInfo.impactPos = sim.endPoint;
-                lastTrajectoryInfo.impactType = sim.impactType;
-                lastTrajectoryInfo.hitEntity = sim.hitEntity;
-                lastTrajectoryInfo.hitTarget = sim.hitTarget;
-                lastTrajectoryInfo.isBlocked = sim.isBlocked;
-                lastTrajectoryInfo.distance = start.distanceTo(sim.endPoint);
-                lastTrajectoryInfo.screenX = projected.x;
-                lastTrajectoryInfo.screenY = projected.y;
-                lastTrajectoryInfo.onScreen = projected.onScreen;
-                lastTrajectoryInfo.depth = projected.depth;
-                lastTrajectoryInfo.isHoldingBow = profile.isBow;
-                lastTrajectoryInfo.isCharged = (currentSpeed > 0.08D);
-                lastTrajectoryInfo.timestamp = System.currentTimeMillis();
-
-                // 2. 方案 B: 3D 侧向手部视差发光节点/点阵光链渲染 (双显或3D光束时生效)
-                if (shouldRender3D) {
-                    PoseStack poseStack = event.getPoseStack();
-                    List<Vec3> visualPoints = buildParallaxTrajectoryPoints(mc, camera, player, partialTick, sim.points, weaponStack, sim.endPoint);
-                    render3DParticleChain(mc, poseStack, camera, player, visualPoints, sim.endPoint, sim.impactType, sim.hitTarget, sim.isBlocked, lockedTarget);
-                }
-            } else {
-                lastTrajectoryInfo.valid = false;
-            }
+            processTrajectorySimulationAndRender(mc, player, event, weaponStack, profile, lockedTarget, shouldRender3D);
         } else {
             lastTrajectoryInfo.valid = false;
         }
 
-        // 3. 目标实体战术锁定 (方案 1: 已全面升级为 2D 屏幕空间自适应 HUD 框，清晰度 100%，彻底告别 1px 细线吞没)
+        // 3. 目标实体战术锁定与提前量引导
         if (hasLockedTarget) {
-            PoseStack poseStack = event.getPoseStack();
-            Camera camera = event.getCamera();
-            float partialTick = event.getPartialTick();
-            boolean isBlocked = lastTrajectoryInfo.valid && lastTrajectoryInfo.isBlocked;
+            renderTargetLeadIndicator(mc, event, lockedTarget, hasProjectileWeapon);
+        }
+    }
 
-            // 移动靶拦截提前量导引光标
-            double targetSpeed = ClientEvents.getSmoothedTargetSpeed();
-            if (hasProjectileWeapon && AutoAttackerConfig.ENABLE_LEAD_INDICATOR.get() && targetSpeed >= 0.04) {
-                ClientEvents.PredictedAim predicted = ClientEvents.getLastPredictedAim();
-                if (predicted != null) {
-                    Vec3 intercept = predicted.interceptPos;
-                    Vec3 targetCenter = lockedTarget.position().add(0, lockedTarget.getBbHeight() * 0.65D, 0);
-                    if (intercept.distanceTo(targetCenter) >= 0.30D) {
-                        // 视锥体剔除检查：仅当提前量光圈在视野内/视锥体碰撞盒内时渲染
-                        ProjectedPoint proj = projectToScreen(camera, intercept, mc);
-                        if (proj.onScreen && proj.depth > 0.05D) {
-                            renderLeadReticle(poseStack, camera, intercept, isBlocked, partialTick);
-                        }
+    private static void processTrajectorySimulationAndRender(Minecraft mc, Player player, RenderLevelStageEvent event,
+                                                            ItemStack weaponStack, ProjectileProfile profile,
+                                                            LivingEntity lockedTarget, boolean shouldRender3D) {
+        Camera camera = event.getCamera();
+        float partialTick = event.getPartialTick();
+        Vec3 start = player.getEyePosition(partialTick).add(player.getViewVector(partialTick).scale(0.12D));
+        Vec3 launchDirection = applyPitchOffset(player.getViewVector(partialTick), profile.pitchOffsetDegrees);
+
+        if (launchDirection.lengthSqr() < 1.0E-8D) {
+            lastTrajectoryInfo.valid = false;
+            return;
+        }
+
+        double currentSpeed = calculateCurrentSpeed(player, weaponStack, profile);
+        double simSpeed = (currentSpeed > 0.08D) ? currentSpeed : profile.speed;
+
+        // 纯净模拟微元轨迹
+        SimResult sim = runSimulation(mc, player, start, launchDirection, simSpeed, profile.gravity, profile.drag, lockedTarget);
+
+        // 计算屏幕空间投影
+        ProjectedPoint projected = projectToScreen(camera, sim.endPoint, mc);
+
+        // 更新共享遥测数据
+        lastTrajectoryInfo.valid = true;
+        lastTrajectoryInfo.impactPos = sim.endPoint;
+        lastTrajectoryInfo.impactType = sim.impactType;
+        lastTrajectoryInfo.hitEntity = sim.hitEntity;
+        lastTrajectoryInfo.hitTarget = sim.hitTarget;
+        lastTrajectoryInfo.isBlocked = sim.isBlocked;
+        lastTrajectoryInfo.distance = start.distanceTo(sim.endPoint);
+        lastTrajectoryInfo.screenX = projected.x;
+        lastTrajectoryInfo.screenY = projected.y;
+        lastTrajectoryInfo.onScreen = projected.onScreen;
+        lastTrajectoryInfo.depth = projected.depth;
+        lastTrajectoryInfo.isHoldingBow = profile.isBow;
+        lastTrajectoryInfo.isCharged = (currentSpeed > 0.08D);
+        lastTrajectoryInfo.timestamp = System.currentTimeMillis();
+
+        // 方案 B: 3D 侧向手部视差发光节点/点阵光链渲染 (双显或 3D 光束时生效)
+        if (shouldRender3D) {
+            PoseStack poseStack = event.getPoseStack();
+            List<Vec3> visualPoints = buildParallaxTrajectoryPoints(mc, camera, player, partialTick, sim.points, weaponStack, sim.endPoint);
+            render3DParticleChain(mc, poseStack, camera, player, visualPoints, sim.endPoint, sim.impactType, sim.hitTarget, sim.isBlocked, lockedTarget);
+        }
+    }
+
+    private static void renderTargetLeadIndicator(Minecraft mc, RenderLevelStageEvent event, LivingEntity lockedTarget, boolean hasProjectileWeapon) {
+        PoseStack poseStack = event.getPoseStack();
+        Camera camera = event.getCamera();
+        float partialTick = event.getPartialTick();
+        boolean isBlocked = lastTrajectoryInfo.valid && lastTrajectoryInfo.isBlocked;
+
+        // 移动靶拦截提前量导引光标
+        double targetSpeed = ClientEvents.getSmoothedTargetSpeed();
+        if (hasProjectileWeapon && AutoAttackerConfig.ENABLE_LEAD_INDICATOR.get() && targetSpeed >= 0.04) {
+            ClientEvents.PredictedAim predicted = ClientEvents.getLastPredictedAim();
+            if (predicted != null) {
+                Vec3 intercept = predicted.interceptPos;
+                Vec3 targetCenter = lockedTarget.position().add(0, lockedTarget.getBbHeight() * 0.65D, 0);
+                if (intercept.distanceTo(targetCenter) >= 0.30D) {
+                    // 视锥体剔除检查：仅当提前量光圈在视野内/视锥体碰撞盒内时渲染
+                    ProjectedPoint proj = projectToScreen(camera, intercept, mc);
+                    if (proj.onScreen && proj.depth > 0.05D) {
+                        renderLeadReticle(poseStack, camera, intercept, isBlocked, partialTick);
                     }
                 }
             }
