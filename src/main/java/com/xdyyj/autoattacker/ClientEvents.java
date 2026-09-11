@@ -1200,15 +1200,19 @@ public class ClientEvents {
 
         Vec3 targetVel = smoothedTargetVelocity;
         if (target.hurtTime > 0) {
-            targetVel = targetVel.scale(0.25D);
+            // 受击衰减因子平滑过渡，避免硬截断导致准星频繁抖动拉扯
+            double hurtDampen = 0.60D + 0.40D * (1.0D - (double) target.hurtTime / 10.0D);
+            targetVel = targetVel.scale(Mth.clamp(hurtDampen, 0.50D, 1.0D));
         }
-        if (targetVel.lengthSqr() > 0.25D) {
-            targetVel = targetVel.normalize().scale(0.50D);
+        // 扩展速度上限以支持高速矿车/鞘翅飞行玩家 (由 0.50D 扩展至 2.50D)
+        if (targetVel.lengthSqr() > 6.25D) {
+            targetVel = targetVel.normalize().scale(2.50D);
         }
 
         // 目标移动速度 (提前量预判严格且唯一作用于目标实体的运动，绝不对玩家自身操作引入反向甩靶漂移)
         // 模组武器/现代枪械不继承玩家自身奔跑跳跃动量；若强加反向补偿会导致玩家移动时准星严重偏离 Hitbox，吸附手感极差
         Vec3 effectiveVel = targetVel;
+        double baseTotalDist = eye.distanceTo(baseAimPoint);
         double baseHorizDist = Math.sqrt((baseAimPoint.x - eye.x) * (baseAimPoint.x - eye.x) + (baseAimPoint.z - eye.z) * (baseAimPoint.z - eye.z));
         float baseDirectYaw = (float) (Mth.atan2(baseAimPoint.z - eye.z, baseAimPoint.x - eye.x) * (180D / Math.PI)) - 90.0F;
         float baseDirectPitch = (float) -(Mth.atan2(baseAimPoint.y - eye.y, Math.max(0.1, baseHorizDist)) * (180D / Math.PI));
@@ -1221,9 +1225,8 @@ public class ClientEvents {
         boolean isGun = com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(getHeldBow(player));
         if (isGun) {
             // 现代枪械：直瞄高平无下坠，绝不施加抛物线仰角抬高！
-            // 仅解算水平前置提前量 (Yaw) 与飞行时间，仰角严格为直瞄直线
-            double horizDist = Math.hypot(baseAimPoint.x - eye.x, baseAimPoint.z - eye.z);
-            double flightTime = horizDist / Math.max(speed, 5.0);
+            // 仅解算水平前置提前量 (Yaw) 与飞行时间，仰角严格为直瞄直线 (使用 3D 距离计算飞行时间)
+            double flightTime = baseTotalDist / Math.max(speed, 5.0);
 
             double futureX = baseAimPoint.x + effectiveVel.x * flightTime;
             double futureZ = baseAimPoint.z + effectiveVel.z * flightTime;
@@ -1280,8 +1283,9 @@ public class ClientEvents {
         }
 
         Vec3 leadOffset = targetPoint.subtract(baseAimPoint);
-        if (leadOffset.lengthSqr() > 25.0D) {
-            targetPoint = baseAimPoint.add(leadOffset.normalize().scale(5.0D));
+        // 扩展提前量位移上限 (由 5.0m 扩展至 25.0m)，支持高速鞘翅/飞行生物及高爆速射武器
+        if (leadOffset.lengthSqr() > 625.0D) {
+            targetPoint = baseAimPoint.add(leadOffset.normalize().scale(25.0D));
         }
 
         double dx = targetPoint.x - eye.x;

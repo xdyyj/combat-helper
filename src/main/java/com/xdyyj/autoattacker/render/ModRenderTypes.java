@@ -13,7 +13,7 @@ public class ModRenderTypes extends RenderType {
         "trajectory_beam",
         DefaultVertexFormat.POSITION_COLOR,
         VertexFormat.Mode.QUADS,
-        256,
+        4096,
         false,
         false,
         RenderType.CompositeState.builder()
