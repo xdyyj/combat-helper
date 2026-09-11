@@ -649,9 +649,11 @@ public final class AutoBallisticsTracker {
         }
     }
 
+    private static final double SUBSTEP = 0.25D;
+
     /**
      * 前向微元物理模拟：模拟箭矢沿指定仰角发射，在达到目标水平距离时的真实高度落点
-     * 遵循原版物理与多介质水阻（空气 0.99，水阻 0.60）
+     * 遵循原版物理与多介质水阻（空气 0.99，水阻 0.60），采用与渲染引擎完全同构的 Substep 微元积分
      */
     private static SimResult simulateTrajectory(Level level, Vec3 eye, double dirX, double dirZ, double targetDist, double targetDy, double speed, double gravity, double drag, double elevAngleRad) {
         double vHoriz = speed * Math.cos(elevAngleRad);
@@ -659,30 +661,33 @@ public final class AutoBallisticsTracker {
         double x = 0.0;
         double y = 0.0;
 
-        int maxSteps = 300;
-        double minY = Math.min(-300.0, targetDy - 100.0);
+        int maxSteps = (int) (300.0 / SUBSTEP);
+        double minY = Math.min(-100.0, targetDy - 50.0);
 
-        int lastBx = Integer.MIN_VALUE, lastBy = Integer.MIN_VALUE, lastBz = Integer.MIN_VALUE;
-        boolean lastIsWater = false;
-
-        BlockPos.MutableBlockPos mutPos = new BlockPos.MutableBlockPos();
+        int lastBx = (eye != null) ? Mth.floor(eye.x) : Integer.MIN_VALUE;
+        int lastBy = (eye != null) ? Mth.floor(eye.y) : Integer.MIN_VALUE;
+        int lastBz = (eye != null) ? Mth.floor(eye.z) : Integer.MIN_VALUE;
+        BlockPos.MutableBlockPos mutPos = new BlockPos.MutableBlockPos(lastBx, lastBy, lastBz);
+        boolean lastIsWater = (level != null && eye != null) && level.isWaterAt(mutPos);
 
         for (int step = 0; step < maxSteps; step++) {
-            double nextX = x + vHoriz;
-            double nextY = y + vy;
+            double dt = SUBSTEP;
+            double dx = vHoriz * dt;
+            double dy = vy * dt;
+            double nextX = x + dx;
+            double nextY = y + dy;
 
             if (nextX >= targetDist) {
-                double frac = (targetDist - x) / Math.max(vHoriz, 1.0E-6);
+                double frac = (targetDist - x) / Math.max(dx, 1.0E-6);
                 frac = Mth.clamp(frac, 0.0, 1.0);
-                double hitY = y + vy * frac;
-                double hitT = step + frac;
+                double hitY = y + dy * frac;
+                double hitT = (step + frac) * dt;
                 return new SimResult(hitY, hitT, true);
             }
 
             x = nextX;
             y = nextY;
 
-            double stepDrag = drag;
             if (level != null && eye != null) {
                 double wx = eye.x + x * dirX;
                 double wy = eye.y + y;
@@ -691,20 +696,19 @@ public final class AutoBallisticsTracker {
                 int by = Mth.floor(wy);
                 int bz = Mth.floor(wz);
 
-                if (bx == lastBx && by == lastBy && bz == lastBz) {
-                    if (lastIsWater) stepDrag = 0.60;
-                } else {
+                if (bx != lastBx || by != lastBy || bz != lastBz) {
                     lastBx = bx;
                     lastBy = by;
                     lastBz = bz;
                     mutPos.set(bx, by, bz);
                     lastIsWater = level.isWaterAt(mutPos);
-                    if (lastIsWater) stepDrag = 0.60;
                 }
             }
 
-            vHoriz *= stepDrag;
-            vy = (vy - gravity) * stepDrag;
+            double currentDrag = lastIsWater ? 0.60D : drag;
+            double substepDrag = Math.pow(currentDrag, dt);
+            vHoriz *= substepDrag;
+            vy = vy * substepDrag - gravity * dt;
 
             if (y < minY && vy < 0.0) break;
         }
@@ -720,7 +724,7 @@ public final class AutoBallisticsTracker {
     }
 
     /**
-     * 二分求解发射仰角：在 8~16 步内收敛到误差 < 0.005 格的绝对精准仰角，支持多介质水阻仿真
+     * 二分求解发射仰角：在 8~24 步内收敛到误差 < 0.01 格的绝对精准仰角，支持多介质水阻跨越仿真
      * @param level 世界实例 (用于水体判定)
      * @param eye 玩家眼睛位置
      * @param targetAimPoint 目标期望击中点 (如胸口中上部)
@@ -753,37 +757,42 @@ public final class AutoBallisticsTracker {
 
         // MC 物理二分迭代搜索最优发射仰角 (elevAngle: 向上为正弧度)
         double directAngle = Math.atan2(targetDy, horizDist);
-        double low = Math.max(Math.toRadians(-89.5), directAngle - Math.toRadians(5.0));
-        double high = Math.min(Math.toRadians(89.5), Math.max(directAngle + Math.toRadians(45.0), Math.toRadians(60.0)));
+        double low = Math.max(Math.toRadians(-89.0), directAngle - Math.toRadians(5.0));
+        double high = Math.min(Math.toRadians(89.0), Math.max(directAngle + Math.toRadians(55.0), Math.toRadians(65.0)));
         if (low >= high) {
-            low = Math.toRadians(-89.5);
-            high = Math.toRadians(89.5);
+            low = Math.toRadians(-89.0);
+            high = Math.toRadians(89.0);
         }
 
         double bestElev = directAngle;
         double bestFlightTime = totalDist / Math.max(speed, 0.25);
         boolean found = false;
         boolean bestReached = false;
+        double bestDiff = Double.MAX_VALUE;
 
-        for (int iter = 0; iter < 16; iter++) {
+        for (int iter = 0; iter < 24; iter++) {
             double mid = (low + high) * 0.5;
             SimResult res = simulateTrajectory(level, eye, dirX, dirZ, horizDist, targetDy, speed, gravity, 0.99, mid);
 
             if (!res.reached) {
-                if (mid > directAngle) {
-                    high = mid; // 仰角过高导致水平初速不足或抛物线落空，应当降低高界
-                } else {
+                // 水体或远距离未命中：若仰角未达到高位 (70°)，说明发射角过平导致在水中阻力耗尽或抛物线提前落地，必须抬高下界
+                if (mid < Math.toRadians(70.0)) {
                     low = mid;
+                } else {
+                    high = mid;
                 }
                 continue;
             }
 
             bestReached = true;
             double diff = res.hitY - targetDy;
-            bestElev = mid;
-            bestFlightTime = res.flightTicks;
+            if (Math.abs(diff) < Math.abs(bestDiff)) {
+                bestDiff = diff;
+                bestElev = mid;
+                bestFlightTime = res.flightTicks;
+            }
 
-            if (Math.abs(diff) < 0.005) {
+            if (Math.abs(diff) < 0.01) {
                 found = true;
                 break;
             }
@@ -796,7 +805,7 @@ public final class AutoBallisticsTracker {
         }
 
         float finalPitchDeg = (float) -(bestElev * (180D / Math.PI));
-        boolean reachable = found || (bestReached && bestFlightTime < 200.0);
+        boolean reachable = found || (bestReached && Math.abs(bestDiff) < 0.5);
         return new TrajectorySolution(finalPitchDeg, bestFlightTime, reachable);
     }
 

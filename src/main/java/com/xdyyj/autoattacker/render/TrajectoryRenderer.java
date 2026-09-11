@@ -695,9 +695,11 @@ public final class TrajectoryRenderer {
         List<Vec3> points = new ArrayList<>();
         points.add(start);
 
-        int lastBx = Integer.MIN_VALUE, lastBy = Integer.MIN_VALUE, lastBz = Integer.MIN_VALUE;
-        boolean lastIsWater = false;
-        BlockPos.MutableBlockPos mutPos = new BlockPos.MutableBlockPos();
+        int lastBx = (start != null) ? Mth.floor(start.x) : Integer.MIN_VALUE;
+        int lastBy = (start != null) ? Mth.floor(start.y) : Integer.MIN_VALUE;
+        int lastBz = (start != null) ? Mth.floor(start.z) : Integer.MIN_VALUE;
+        BlockPos.MutableBlockPos mutPos = new BlockPos.MutableBlockPos(lastBx, lastBy, lastBz);
+        boolean lastIsWater = (mc.level != null && start != null) && mc.level.isWaterAt(mutPos);
 
         for (int step = 0; step < MAX_STEPS && traveled < maxLength; step++) {
             Vec3 proposed = position.add(velocity.scale(SUBSTEP));
@@ -722,23 +724,20 @@ public final class TrajectoryRenderer {
             }
             if (traveled >= maxLength - 1.0E-6D) break;
 
-            double currentDrag = drag;
             if (mc.level != null) {
                 int bx = Mth.floor(position.x);
                 int by = Mth.floor(position.y);
                 int bz = Mth.floor(position.z);
-                if (bx == lastBx && by == lastBy && bz == lastBz) {
-                    if (lastIsWater) currentDrag = 0.60D;
-                } else {
+                if (bx != lastBx || by != lastBy || bz != lastBz) {
                     lastBx = bx;
                     lastBy = by;
                     lastBz = bz;
                     mutPos.set(bx, by, bz);
                     lastIsWater = mc.level.isWaterAt(mutPos);
-                    if (lastIsWater) currentDrag = 0.60D;
                 }
             }
 
+            double currentDrag = lastIsWater ? 0.60D : drag;
             double substepDrag = Math.pow(currentDrag, SUBSTEP);
             velocity = velocity.scale(substepDrag).add(0.0D, -gravity * SUBSTEP, 0.0D);
         }
