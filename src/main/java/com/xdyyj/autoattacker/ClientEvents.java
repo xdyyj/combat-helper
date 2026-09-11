@@ -21,9 +21,8 @@ import net.minecraft.world.level.ClipContext;
 import net.minecraft.util.Mth;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.client.event.InputEvent;
-import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.common.ForgeHooks;
 import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.event.level.LevelEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraft.tags.ItemTags;
@@ -1404,10 +1403,8 @@ public class ClientEvents {
             gameMode.attack(player, target);
             player.swing(InteractionHand.MAIN_HAND);
         } else {
-            PlayerInteractEvent.LeftClickEmpty event = new PlayerInteractEvent.LeftClickEmpty(player);
-            boolean isCancelled = MinecraftForge.EVENT_BUS.post(event);
-            if (isCancelled) return;
             player.resetAttackStrengthTicker();
+            ForgeHooks.onEmptyLeftClick(player);
             player.swing(InteractionHand.MAIN_HAND);
         }
     }
