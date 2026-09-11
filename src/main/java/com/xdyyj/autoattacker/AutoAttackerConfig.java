@@ -402,31 +402,33 @@ public class AutoAttackerConfig {
         Set<Item> newBlacklistItems = ConcurrentHashMap.newKeySet();
         Set<TagKey<Item>> newBlacklistTags = ConcurrentHashMap.newKeySet();
         parseList(BLACKLIST.get(), newBlacklistItems, newBlacklistTags);
-        blacklistItems = newBlacklistItems;
-        blacklistTags = newBlacklistTags;
 
         Set<Item> newWhitelistItems = ConcurrentHashMap.newKeySet();
         Set<TagKey<Item>> newWhitelistTags = ConcurrentHashMap.newKeySet();
         parseList(WHITELIST.get(), newWhitelistItems, newWhitelistTags);
-        whitelistItems = newWhitelistItems;
-        whitelistTags = newWhitelistTags;
 
         Set<net.minecraft.world.entity.EntityType<?>> newExcludedEntities = ConcurrentHashMap.newKeySet();
         parseEntityList(ENTITY_BLACKLIST.get(), newExcludedEntities);
-        excludedEntities = newExcludedEntities;
 
         Set<Item> newZeroGItems = ConcurrentHashMap.newKeySet();
         Set<TagKey<Item>> newZeroGTags = ConcurrentHashMap.newKeySet();
         parseList(ZERO_GRAVITY_BOWS.get(), newZeroGItems, newZeroGTags);
-        zeroGravityBowItems = newZeroGItems;
-        zeroGravityBowTags = newZeroGTags;
 
         Map<Item, Double> newGravityMap = new ConcurrentHashMap<>();
         parseKeyValueDoubleMap(BOW_GRAVITY_OVERRIDES.get(), newGravityMap);
-        bowGravityMap = newGravityMap;
 
         Map<Item, Double> newSpeedMap = new ConcurrentHashMap<>();
         parseKeyValueDoubleMap(BOW_SPEED_OVERRIDES.get(), newSpeedMap);
+
+        // 包含所有集合在内在构建完毕后统一做 volatile 原子赋值，避免中间过程非一致性读取
+        blacklistItems = newBlacklistItems;
+        blacklistTags = newBlacklistTags;
+        whitelistItems = newWhitelistItems;
+        whitelistTags = newWhitelistTags;
+        excludedEntities = newExcludedEntities;
+        zeroGravityBowItems = newZeroGItems;
+        zeroGravityBowTags = newZeroGTags;
+        bowGravityMap = newGravityMap;
         bowSpeedMap = newSpeedMap;
     }
 

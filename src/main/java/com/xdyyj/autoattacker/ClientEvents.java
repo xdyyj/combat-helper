@@ -5,6 +5,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.TamableAnimal;
+import net.minecraft.world.entity.OwnableEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.CrossbowItem;
@@ -122,6 +124,33 @@ public class ClientEvents {
         return ClientModEvents.DEBUG_PANEL_KEY.getKey().getValue();
     }
 
+    public static boolean isValidTarget(Player player, LivingEntity target) {
+        if (target == null || target == player || !target.isAlive() || target.isRemoved() || target.getHealth() <= 0.0f) {
+            return false;
+        }
+        if (target.isSpectator() || !target.isPickable()) {
+            return false;
+        }
+        if (AutoAttackerConfig.excludedEntities.contains(target.getType())) {
+            return false;
+        }
+        if (player != null) {
+            if (player.isAlliedTo(target)) {
+                return false;
+            }
+            if (target instanceof TamableAnimal tamable) {
+                if (tamable.isTame() && (tamable.isOwnedBy(player) || player.isAlliedTo(tamable))) {
+                    return false;
+                }
+            } else if (target instanceof OwnableEntity ownable) {
+                if (ownable.getOwner() == player) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     private void resetTargetTracking() {
         lastTarget = null;
         smoothedTargetVelocity = Vec3.ZERO;
@@ -207,15 +236,16 @@ public class ClientEvents {
                             if (currentTarget != null && currentTarget.isAlive()) {
                                 AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(itemInUse);
                                 Vec3 eye = player.getEyePosition();
-                                double torsoY = currentTarget.getY() + currentTarget.getBbHeight() * 0.65D;
-                                Vec3 baseAimPoint = new Vec3(currentTarget.getX(), torsoY, currentTarget.getZ());
+                                double targetDistXZ = Math.hypot(currentTarget.getX() - eye.x, currentTarget.getZ() - eye.z);
+                                double targetY = computeTargetY(currentTarget, 1.0f, AutoAttackerConfig.TARGET_PART.get(), false, true, targetDistXZ);
+                                Vec3 baseAimPoint = new Vec3(currentTarget.getX(), targetY, currentTarget.getZ());
 
                                 float sendYaw = player.getYRot();
                                 float sendPitch = player.getXRot();
 
                                 if (profile.isHoming) {
                                     double dX = currentTarget.getX() - eye.x;
-                                    double dY = torsoY - eye.y;
+                                    double dY = targetY - eye.y;
                                     double dZ = currentTarget.getZ() - eye.z;
                                     double horizDist = Math.sqrt(dX * dX + dZ * dZ);
                                     sendYaw = (float) (Mth.atan2(dZ, dX) * (180D / Math.PI)) - 90.0F;
@@ -485,10 +515,10 @@ public class ClientEvents {
                     double maxLockDist = (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get())
                             ? Math.max(64.0, AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get())
                             : 64.0;
-                    boolean isDeadOrRemoved = !currentTarget.isAlive() || currentTarget.isRemoved() || currentTarget.getHealth() <= 0.0f;
+                    boolean isInvalid = !isValidTarget(player, currentTarget);
                     boolean isOutOfRange = currentTarget.level() != player.level() || currentTarget.distanceToSqr(player) > maxLockDist * maxLockDist;
 
-                    if (isDeadOrRemoved || isOutOfRange) {
+                    if (isInvalid || isOutOfRange) {
                         if (AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()) {
                             // 目标死亡或超距，毫秒级无缝自动寻觅切换下一位最佳目标！
                             currentTarget = getPrioritizedTarget(player, searchRange, 90.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), currentTarget);
@@ -639,17 +669,15 @@ public class ClientEvents {
                     mouseDeflectionPitch = 0f;
                     TacticalDebugPanel.setStatus("切换锁定: " + switchTarget.getType().getDescription().getString());
                 } else if (deflection >= deadzoneThreshold * 2.5) {
-                    // 若无其他目标且强力甩开视角 (>2.5倍阈值)，在 TOGGLE 模式下解除锁定
-                    if (AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.TOGGLE) {
-                        currentTarget = null;
-                        staticCurrentTarget = null;
-                        lastSwitchTime = now;
-                        mouseDeflectionYaw = 0f;
-                        mouseDeflectionPitch = 0f;
-                        wasLockedLastFrame = false;
-                        TacticalDebugPanel.setStatus("甩脱视角: 已解除锁定");
-                        return;
-                    }
+                    // 若无其他目标且强力甩开视角 (>2.5倍阈值)，解脱锁定并给予静默期
+                    currentTarget = null;
+                    staticCurrentTarget = null;
+                    lastSwitchTime = now + 600L; // 给予 600ms 静默期，防止瞬间重新锁回
+                    mouseDeflectionYaw = 0f;
+                    mouseDeflectionPitch = 0f;
+                    wasLockedLastFrame = false;
+                    TacticalDebugPanel.setStatus("甩脱视角: 已解除锁定");
+                    return;
                 }
             }
         }
@@ -662,9 +690,6 @@ public class ClientEvents {
         double pz = Mth.lerp((double) partialTick, player.zo, player.getZ());
 
         double tx = Mth.lerp((double) partialTick, target.xo, target.getX());
-        double bodyY = Mth.lerp((double) partialTick, target.yo, target.getY()) + target.getBbHeight() / 2.0;
-        double torsoY = Mth.lerp((double) partialTick, target.yo, target.getY()) + target.getBbHeight() * 0.65;
-        double headY = Mth.lerp((double) partialTick, target.yo, target.getY()) + target.getEyeHeight();
         double tz = Mth.lerp((double) partialTick, target.zo, target.getZ());
 
         ItemStack bowStack = getHeldBow(player);
@@ -672,39 +697,9 @@ public class ClientEvents {
         boolean isGun = com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(bowStack);
         AutoBallisticsTracker.BallisticsProfile profile = isHoldingBow ? AutoBallisticsTracker.getProfile(bowStack) : null;
 
-        double baseTargetY;
-        AutoAttackerConfig.TargetPart part = AutoAttackerConfig.TARGET_PART.get();
-        double targetDistXZ = Math.sqrt((tx - px) * (tx - px) + (tz - pz) * (tz - pz));
-        if (part == AutoAttackerConfig.TargetPart.HEAD) {
-            // 头部优先：全程稳定死锁头部 Hitbox，绝不因受击硬直而在头胸间颠簸
-            if (isGun && targetDistXZ > 40.0) {
-                baseTargetY = headY - 0.10D; // 远距离锁定在面门/鼻梁，枪口微跳仍在爆头区内
-            } else {
-                baseTargetY = headY;
-            }
-        } else if (part == AutoAttackerConfig.TargetPart.TORSO) {
-            // 躯干中心：稳定锁定胸腹部
-            baseTargetY = isHoldingBow ? torsoY : bodyY;
-        } else { // ADAPTIVE (智能自适应)
-            if (isGun) {
-                // 枪械拥有 150%~250% 爆头倍率，中远距离必须稳定锁头！
-                // 彻底移除 target.hurtTime 判定，消除连发命中时头胸来回跳变抽搐的根本根源！
-                if (targetDistXZ > 70.0) {
-                    baseTargetY = headY - 0.16D; // 超远距离瞄准下巴/颈部中心，连发压枪刚好覆盖整个头部
-                } else if (targetDistXZ < 3.0) {
-                    baseTargetY = torsoY; // 贴脸 3 米内锁定胸部躯干，极大提高腰射容错
-                } else {
-                    baseTargetY = headY; // 3~70 米黄金交战距离稳定锁头
-                }
-            } else {
-                // 弓箭与近战武器自适应：近距锁头，远距下坠较大时瞄准躯干
-                if (targetDistXZ <= 25.0) {
-                    baseTargetY = headY;
-                } else {
-                    baseTargetY = isHoldingBow ? torsoY : bodyY;
-                }
-            }
-        }
+        double targetDistXZ = Math.hypot(tx - px, tz - pz);
+        double baseTargetY = computeTargetY(target, partialTick, AutoAttackerConfig.TARGET_PART.get(), isGun, isHoldingBow, targetDistXZ);
+
         Vec3 eye = new Vec3(px, py, pz);
         Vec3 baseAimPoint = new Vec3(tx, baseTargetY, tz);
 
@@ -844,10 +839,22 @@ public class ClientEvents {
             }
         }
 
+        // 微小角距平滑阻尼 (Micro-angle Damping Buffer)，当视角与目标差角极小 (<0.03°) 时渐进衰减拉拽，彻底杜绝镜头高频震荡 (Jitter)
+        float absDeltaY = Math.abs(deltaY);
+        float absDeltaX = Math.abs(deltaX);
+        float dampedDeltaY = deltaY;
+        float dampedDeltaX = deltaX;
+        if (absDeltaY < 0.03f) {
+            dampedDeltaY *= (absDeltaY / 0.03f);
+        }
+        if (absDeltaX < 0.03f) {
+            dampedDeltaX *= (absDeltaX / 0.03f);
+        }
+
         float alphaY = 1.0f - (float) Math.pow(1.0 - factorYaw, deltaSec * 20.0);
         float alphaX = 1.0f - (float) Math.pow(1.0 - factorPitch, deltaSec * 20.0);
-        float stepY = kinematicYaw + deltaY * alphaY;
-        float stepX = kinematicPitch + deltaX * alphaX;
+        float stepY = kinematicYaw + dampedDeltaY * alphaY;
+        float stepX = kinematicPitch + dampedDeltaX * alphaX;
 
         float newYaw = player.getYRot() + stepY;
         float newPitch = Mth.clamp(player.getXRot() + stepX, -89.5F, 89.5F);
@@ -879,7 +886,7 @@ public class ClientEvents {
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
-                e -> e != player && e.isAlive() && !AutoAttackerConfig.excludedEntities.contains(e.getType()));
+                e -> isValidTarget(player, e));
 
         LivingEntity bestEntity = null;
         double bestDistSqr = Double.MAX_VALUE;
@@ -928,7 +935,7 @@ public class ClientEvents {
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
-                e -> e != player && e != excludeTarget && e.isAlive() && !AutoAttackerConfig.excludedEntities.contains(e.getType()));
+                e -> e != excludeTarget && isValidTarget(player, e));
 
         double rangeSqr = range * range;
         LivingEntity bestEntity = null;
@@ -979,7 +986,7 @@ public class ClientEvents {
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
-            e -> e != player && e != excludeTarget && e.isAlive() && !AutoAttackerConfig.excludedEntities.contains(e.getType()));
+            e -> e != excludeTarget && isValidTarget(player, e));
 
         double rangeSqr = range * range;
         LivingEntity bestEntity = null;
@@ -1020,16 +1027,25 @@ public class ClientEvents {
         Vec3 eye = player.getEyePosition();
         AABB bb = target.getBoundingBox();
 
+        // 1. 眼睛部位点
+        Vec3 headEyePos = target.getEyePosition();
+        if (player.level().clip(new ClipContext(eye, headEyePos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() == HitResult.Type.MISS) {
+            return true;
+        }
+
+        // 2. Hitbox 中心点
         Vec3 center = bb.getCenter();
         if (player.level().clip(new ClipContext(eye, center, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() == HitResult.Type.MISS) {
             return true;
         }
 
-        Vec3 top = new Vec3(center.x, bb.maxY - 0.1, center.z);
+        // 3. 头部顶端 (maxY - 0.05)
+        Vec3 top = new Vec3(center.x, bb.maxY - 0.05, center.z);
         if (player.level().clip(new ClipContext(eye, top, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() == HitResult.Type.MISS) {
             return true;
         }
 
+        // 4. 躯体腰部 (65% 高度)
         Vec3 waist = new Vec3(center.x, bb.minY + (bb.maxY - bb.minY) * 0.65, center.z);
         return player.level().clip(new ClipContext(eye, waist, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() == HitResult.Type.MISS;
     }
@@ -1297,6 +1313,55 @@ public class ClientEvents {
             if (isCancelled) return;
             player.resetAttackStrengthTicker();
             player.swing(InteractionHand.MAIN_HAND);
+        }
+    }
+
+    public static double computeTargetY(LivingEntity target, float partialTick, AutoAttackerConfig.TargetPart part, boolean isGun, boolean isHoldingBow, double targetDistXZ) {
+        double bbHeight = target.getBbHeight();
+        double eyeHeight = target.getEyeHeight();
+        double targetY = Mth.lerp((double) partialTick, target.yo, target.getY());
+
+        double headY;
+        double torsoY;
+        double bodyY = targetY + bbHeight * 0.5D;
+
+        if (target.isBaby()) {
+            headY = targetY + Math.max(eyeHeight, bbHeight * 0.82D);
+            torsoY = targetY + bbHeight * 0.55D;
+        } else if (target instanceof net.minecraft.world.entity.boss.enderdragon.EnderDragon) {
+            headY = targetY + bbHeight * 0.5D;
+            torsoY = targetY + bbHeight * 0.4D;
+        } else if (bbHeight > 3.0D) {
+            headY = targetY + Math.min(eyeHeight, bbHeight * 0.90D);
+            torsoY = targetY + bbHeight * 0.60D;
+        } else {
+            headY = targetY + eyeHeight;
+            torsoY = targetY + bbHeight * 0.65D;
+        }
+
+        if (part == AutoAttackerConfig.TargetPart.HEAD) {
+            if (isGun && targetDistXZ > 40.0) {
+                return headY - Math.min(0.12D, bbHeight * 0.05D);
+            }
+            return headY;
+        } else if (part == AutoAttackerConfig.TargetPart.TORSO) {
+            return isHoldingBow ? torsoY : bodyY;
+        } else { // ADAPTIVE
+            if (isGun) {
+                if (targetDistXZ > 70.0) {
+                    return headY - Math.min(0.16D, bbHeight * 0.08D);
+                } else if (targetDistXZ < 3.0) {
+                    return torsoY;
+                } else {
+                    return headY;
+                }
+            } else {
+                if (targetDistXZ <= 25.0) {
+                    return headY;
+                } else {
+                    return isHoldingBow ? torsoY : bodyY;
+                }
+            }
         }
     }
 
