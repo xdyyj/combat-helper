@@ -647,8 +647,8 @@ public final class AutoBallisticsTracker {
         double x = 0.0;
         double y = 0.0;
 
-        int maxSteps = 160;
-        double minY = Math.min(-200.0, targetDy - 50.0);
+        int maxSteps = 300;
+        double minY = Math.min(-300.0, targetDy - 100.0);
         for (int step = 0; step < maxSteps; step++) {
             double nextX = x + vx;
             double nextY = y + vy;
@@ -668,11 +668,11 @@ public final class AutoBallisticsTracker {
 
             if (y < minY && vy < 0.0) break;
         }
-        return new SimResult(y, 160.0, false);
+        return new SimResult(y, 300.0, false);
     }
 
     /**
-     * 二分求解发射仰角：在 8~10 步内收敛到误差 < 0.001 格的绝对精准仰角
+     * 二分求解发射仰角：在 8~16 步内收敛到误差 < 0.005 格的绝对精准仰角
      * @param eye 玩家眼睛位置
      * @param targetAimPoint 目标期望击中点 (如胸口中上部)
      * @param speed 初速度
@@ -684,26 +684,33 @@ public final class AutoBallisticsTracker {
         double dz = targetAimPoint.z - eye.z;
         double horizDist = Math.sqrt(dx * dx + dz * dz);
         double targetDy = targetAimPoint.y - eye.y;
+        double totalDist = eye.distanceTo(targetAimPoint);
 
         if (horizDist < 0.15) {
-            float directPitch = (float) -(Mth.atan2(targetDy, Math.max(0.01, horizDist)) * (180D / Math.PI));
-            return new TrajectorySolution(directPitch, 0.1, true);
+            float directPitch = (float) -(Mth.atan2(targetDy, Math.max(0.001, horizDist)) * (180D / Math.PI));
+            double flightTime = totalDist / Math.max(speed, 0.25);
+            return new TrajectorySolution(directPitch, flightTime, true);
         }
 
         // 零重力武器 (如百中弓、水晶弓)：纯几何直线
         if (gravity <= 1.0E-6D) {
-            float directPitch = (float) -(Mth.atan2(targetDy, horizDist) * (180D / Math.PI));
-            double flightTime = horizDist / Math.max(speed, 0.25);
+            float directPitch = (float) -(Mth.atan2(targetDy, Math.max(0.001, horizDist)) * (180D / Math.PI));
+            double flightTime = totalDist / Math.max(speed, 0.25);
             return new TrajectorySolution(directPitch, flightTime, true);
         }
 
         // MC 物理二分迭代搜索最优发射仰角 (elevAngle: 向上为正弧度)
         // 动态自适应边界：根据目标几何视角动态扩展，完美解决高处俯射(-89°)、飞行俯冲与超大角度防空(+89°)问题
         double directAngle = Math.atan2(targetDy, horizDist);
-        double low = Math.max(Math.toRadians(-89.0), directAngle - Math.toRadians(2.0));
-        double high = Math.min(Math.toRadians(89.0), Math.max(directAngle + Math.toRadians(45.0), Math.toRadians(60.0)));
+        double low = Math.max(Math.toRadians(-89.5), directAngle - Math.toRadians(5.0));
+        double high = Math.min(Math.toRadians(89.5), Math.max(directAngle + Math.toRadians(45.0), Math.toRadians(60.0)));
+        if (low >= high) {
+            low = Math.toRadians(-89.5);
+            high = Math.toRadians(89.5);
+        }
+
         double bestElev = directAngle;
-        double bestFlightTime = horizDist / speed;
+        double bestFlightTime = totalDist / Math.max(speed, 0.25);
         boolean found = false;
 
         for (int iter = 0; iter < 16; iter++) {
@@ -711,7 +718,11 @@ public final class AutoBallisticsTracker {
             SimResult res = simulateTrajectory(horizDist, targetDy, speed, gravity, 0.99, mid);
 
             if (!res.reached) {
-                low = mid;
+                if (mid > directAngle) {
+                    high = mid; // 仰角过高导致水平初速不足或抛物线落空，应当降低高界
+                } else {
+                    low = mid;
+                }
                 continue;
             }
 
@@ -732,7 +743,7 @@ public final class AutoBallisticsTracker {
         }
 
         float finalPitchDeg = (float) -(bestElev * (180D / Math.PI));
-        return new TrajectorySolution(finalPitchDeg, bestFlightTime, found || bestFlightTime < 100.0);
+        return new TrajectorySolution(finalPitchDeg, bestFlightTime, found || bestFlightTime < 200.0);
     }
 
     // =========================================================================

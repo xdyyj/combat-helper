@@ -47,6 +47,22 @@ public final class TrajectoryRenderer {
     // 缓存最新一帧的弹道与屏幕投影数据供 HUD 与 3D 渲染共享
     private static final TrajectoryInfo lastTrajectoryInfo = new TrajectoryInfo();
 
+    // 静态可重用渲染缓冲区 (避免每帧分配堆内存数组)
+    private static Vec3[] SIDE_NORMALS_BUFFER = new Vec3[1024];
+    private static double[] HALF_WIDTHS_BUFFER = new double[1024];
+    private static float[] CORE_COLORS_BUFFER = new float[1024 * 3];
+    private static float[] EDGE_COLORS_BUFFER = new float[1024 * 3];
+
+    private static void ensureBufferCapacity(int requiredPoints) {
+        if (SIDE_NORMALS_BUFFER.length < requiredPoints) {
+            int newCap = Math.max(requiredPoints, SIDE_NORMALS_BUFFER.length * 2);
+            SIDE_NORMALS_BUFFER = new Vec3[newCap];
+            HALF_WIDTHS_BUFFER = new double[newCap];
+            CORE_COLORS_BUFFER = new float[newCap * 3];
+            EDGE_COLORS_BUFFER = new float[newCap * 3];
+        }
+    }
+
     private TrajectoryRenderer() {}
 
     public static TrajectoryInfo getLastTrajectoryInfo() {
@@ -136,7 +152,11 @@ public final class TrajectoryRenderer {
                     Vec3 intercept = predicted.interceptPos;
                     Vec3 targetCenter = lockedTarget.position().add(0, lockedTarget.getBbHeight() * 0.65D, 0);
                     if (intercept.distanceTo(targetCenter) >= 0.30D) {
-                        renderLeadReticle(poseStack, camera, intercept, isBlocked, partialTick);
+                        // 视锥体剔除检查：仅当提前量光圈在视野内/视锥体碰撞盒内时渲染
+                        ProjectedPoint proj = projectToScreen(camera, intercept, mc);
+                        if (proj.onScreen && proj.depth > 0.05D) {
+                            renderLeadReticle(poseStack, camera, intercept, isBlocked, partialTick);
+                        }
                     }
                 }
             }
@@ -448,10 +468,7 @@ public final class TrajectoryRenderer {
         Vec3 camUp = camRight.cross(forward).normalize();
 
         int numPoints = validPoints.size();
-        Vec3[] sideNormals = new Vec3[numPoints];
-        double[] halfWidths = new double[numPoints];
-        float[][] coreColors = new float[numPoints][3]; // r, g, b (中心高亮光芯)
-        float[][] edgeColors = new float[numPoints][3]; // r, g, b (外缘羽化光晕)
+        ensureBufferCapacity(numPoints);
 
         // 纯净高对比度战术调色板 (无杂色、高清晰度):
         // 开阔瞄准：中心为纯净白青芯，外缘为鲜艳赛博电光青
@@ -463,12 +480,6 @@ public final class TrajectoryRenderer {
         float baseEdgeR = hitTarget ? 1.00F : 0.00F;
         float baseEdgeG = hitTarget ? 0.70F : 0.82F;
         float baseEdgeB = hitTarget ? 0.05F : 1.00F;
-
-        double totalTrajectoryLen = 0.0D;
-        for (int i = 0; i < numPoints - 1; i++) {
-            totalTrajectoryLen += validPoints.get(i).distanceTo(validPoints.get(i + 1));
-        }
-        if (totalTrajectoryLen < 1.0E-4D) totalTrajectoryLen = 1.0D;
 
         double accumulatedDist = 0.0D;
         Vec3 prevPt = validPoints.get(0);
@@ -506,7 +517,7 @@ public final class TrajectoryRenderer {
                 double ny = tx / len;
                 side = camRight.scale(nx).add(camUp.scale(ny)).normalize();
             }
-            sideNormals[i] = side;
+            SIDE_NORMALS_BUFFER[i] = side;
 
             double distToCam = pt.distanceTo(cameraPos);
 
@@ -516,7 +527,7 @@ public final class TrajectoryRenderer {
             // 屏幕空间恒定 ~1.4 像素保底：distToCam * 0.0018D
             // 近处保持物理纤细 (0.0035m)，远处自动保持 1.4px 激光线，无论 50m 还是 100m 都清晰连贯、绝不消失！
             double pixelFloor = distToCam * 0.0018D;
-            halfWidths[i] = Math.max(0.0035D, pixelFloor) * handFade;
+            HALF_WIDTHS_BUFFER[i] = Math.max(0.0035D, pixelFloor) * handFade;
 
             // 末端阻挡警示渐变：受阻时在撞击点前 2.5 米内平滑过渡为猩红
             float cr = baseCoreR, cg = baseCoreG, cb = baseCoreB;
@@ -534,13 +545,13 @@ public final class TrajectoryRenderer {
                 }
             }
 
-            coreColors[i][0] = cr;
-            coreColors[i][1] = cg;
-            coreColors[i][2] = cb;
+            CORE_COLORS_BUFFER[i * 3] = cr;
+            CORE_COLORS_BUFFER[i * 3 + 1] = cg;
+            CORE_COLORS_BUFFER[i * 3 + 2] = cb;
 
-            edgeColors[i][0] = er;
-            edgeColors[i][1] = eg;
-            edgeColors[i][2] = eb;
+            EDGE_COLORS_BUFFER[i * 3] = er;
+            EDGE_COLORS_BUFFER[i * 3 + 1] = eg;
+            EDGE_COLORS_BUFFER[i * 3 + 2] = eb;
         }
 
         // 3. 渲染样式 A 极细微光光束：削细 60% 后极度轻灵的高能激光丝 (核心半透明通透光流)
@@ -552,14 +563,14 @@ public final class TrajectoryRenderer {
         for (int i = 0; i < numPoints - 1; i++) {
             Vec3 p0 = validPoints.get(i);
             Vec3 p1 = validPoints.get(i + 1);
-            Vec3 s0 = sideNormals[i];
-            Vec3 s1 = sideNormals[i + 1];
+            Vec3 s0 = SIDE_NORMALS_BUFFER[i];
+            Vec3 s1 = SIDE_NORMALS_BUFFER[i + 1];
 
-            double wCore0 = halfWidths[i] * 0.45D;
-            double wOuter0 = halfWidths[i] * 1.15D;
+            double wCore0 = HALF_WIDTHS_BUFFER[i] * 0.45D;
+            double wOuter0 = HALF_WIDTHS_BUFFER[i] * 1.15D;
 
-            double wCore1 = halfWidths[i + 1] * 0.45D;
-            double wOuter1 = halfWidths[i + 1] * 1.15D;
+            double wCore1 = HALF_WIDTHS_BUFFER[i + 1] * 0.45D;
+            double wOuter1 = HALF_WIDTHS_BUFFER[i + 1] * 1.15D;
 
             Vec3 lOut0 = p0.subtract(s0.scale(wOuter0));
             Vec3 lIn0 = p0.subtract(s0.scale(wCore0));
@@ -571,11 +582,11 @@ public final class TrajectoryRenderer {
             Vec3 rIn1 = p1.add(s1.scale(wCore1));
             Vec3 rOut1 = p1.add(s1.scale(wOuter1));
 
-            float cr0 = coreColors[i][0], cg0 = coreColors[i][1], cb0 = coreColors[i][2];
-            float er0 = edgeColors[i][0], eg0 = edgeColors[i][1], eb0 = edgeColors[i][2];
+            float cr0 = CORE_COLORS_BUFFER[i * 3], cg0 = CORE_COLORS_BUFFER[i * 3 + 1], cb0 = CORE_COLORS_BUFFER[i * 3 + 2];
+            float er0 = EDGE_COLORS_BUFFER[i * 3], eg0 = EDGE_COLORS_BUFFER[i * 3 + 1], eb0 = EDGE_COLORS_BUFFER[i * 3 + 2];
 
-            float cr1 = coreColors[i + 1][0], cg1 = coreColors[i + 1][1], cb1 = coreColors[i + 1][2];
-            float er1 = edgeColors[i + 1][0], eg1 = edgeColors[i + 1][1], eb1 = edgeColors[i + 1][2];
+            float cr1 = CORE_COLORS_BUFFER[(i + 1) * 3], cg1 = CORE_COLORS_BUFFER[(i + 1) * 3 + 1], cb1 = CORE_COLORS_BUFFER[(i + 1) * 3 + 2];
+            float er1 = EDGE_COLORS_BUFFER[(i + 1) * 3], eg1 = EDGE_COLORS_BUFFER[(i + 1) * 3 + 1], eb1 = EDGE_COLORS_BUFFER[(i + 1) * 3 + 2];
 
             // 1. 左羽化翼：透明外缘 -> 纤细光芯
             quadConsumer.vertex(matrix, (float) lOut0.x, (float) lOut0.y, (float) lOut0.z).color(er0, eg0, eb0, 0.00F).endVertex();
