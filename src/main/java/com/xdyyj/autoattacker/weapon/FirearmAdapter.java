@@ -8,9 +8,11 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
+import com.mojang.logging.LogUtils;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.registries.ForgeRegistries;
+import org.slf4j.Logger;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -35,6 +37,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * 6. 通用枪械模组启发式退避适配
  */
 public final class FirearmAdapter {
+
+    private static final Logger LOGGER = LogUtils.getLogger();
 
     public static final TagKey<Item> FORGE_GUNS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:guns"));
     public static final TagKey<Item> C_GUNS_TAG = ItemTags.create(ResourceLocation.tryParse("c:guns"));
@@ -308,9 +312,8 @@ public final class FirearmAdapter {
         if (stack == null || stack.isEmpty()) return false;
         initTaczReflection();
         if (taczAvailable && taczGetIGunOrNullMethod != null) {
-            try {
-                return taczGetIGunOrNullMethod.invoke(null, stack) != null;
-            } catch (Throwable ignored) {}
+            Object iGun = safeInvoke(taczGetIGunOrNullMethod, null, stack);
+            return iGun != null;
         }
         return false;
     }
@@ -408,68 +411,62 @@ public final class FirearmAdapter {
         if (isTaczGun(stack)) {
             initTaczReflection();
             if (taczAvailable && taczGetIGunOrNullMethod != null) {
-                try {
-                    Object iGunObj = taczGetIGunOrNullMethod.invoke(null, stack);
+                GunStatus status = invokeSilently(() -> {
+                    Object iGunObj = safeInvoke(taczGetIGunOrNullMethod, null, stack);
                     if (iGunObj != null) {
-                        ResourceLocation gunId = (ResourceLocation) taczGetGunIdMethod.invoke(iGunObj, stack);
-                        int curAmmo = (int) taczGetCurrentAmmoMethod.invoke(iGunObj, stack);
+                        ResourceLocation gunId = safeInvoke(taczGetGunIdMethod, iGunObj, stack);
+                        int curAmmo = safeInvokeOrDefault(taczGetCurrentAmmoMethod, iGunObj, 0, stack);
                         boolean hasBulletInBarrel = false;
                         if (taczHasBulletInBarrelMethod != null) {
-                            try {
-                                hasBulletInBarrel = (boolean) taczHasBulletInBarrelMethod.invoke(iGunObj, stack);
-                            } catch (Throwable ignored) {}
+                            hasBulletInBarrel = safeInvokeOrDefault(taczHasBulletInBarrelMethod, iGunObj, false, stack);
                         }
-                        int rpm = (taczGetRPMMethod != null) ? (int) taczGetRPMMethod.invoke(iGunObj, stack) : 600;
-                        Object fireModeObj = (taczGetFireModeMethod != null) ? taczGetFireModeMethod.invoke(iGunObj, stack) : null;
+                        int rpm = (taczGetRPMMethod != null) ? safeInvokeOrDefault(taczGetRPMMethod, iGunObj, 600, stack) : 600;
+                        Object fireModeObj = (taczGetFireModeMethod != null) ? safeInvoke(taczGetFireModeMethod, iGunObj, stack) : null;
                         String fireMode = fireModeObj != null ? fireModeObj.toString() : "AUTO";
 
                         // 检索 CommonGunIndex
-                        Object gunIndexOpt = taczGetCommonGunIndexMethod.invoke(null, gunId);
+                        Object gunIndexOpt = safeInvoke(taczGetCommonGunIndexMethod, null, gunId);
                         if (gunIndexOpt instanceof Optional<?> opt && opt.isPresent()) {
                             Object gunIndex = opt.get();
-                            String rawType = (String) taczGetTypeMethod.invoke(gunIndex);
+                            String rawType = safeInvoke(taczGetTypeMethod, gunIndex);
                             String typeName = translateGunType(rawType);
 
-                            Object bulletData = taczGetBulletDataMethod.invoke(gunIndex);
-                            float speedMs = (float) taczGetSpeedMethod.invoke(bulletData);
+                            Object bulletData = safeInvoke(taczGetBulletDataMethod, gunIndex);
+                            float speedMs = safeInvokeOrDefault(taczGetSpeedMethod, bulletData, 0.0f);
                             float bulletSpeedBlocksPerTick = speedMs / 20.0f;
-                            float gravity = (float) taczGetGravityMethod.invoke(bulletData);
+                            float gravity = safeInvokeOrDefault(taczGetGravityMethod, bulletData, 0.0f);
 
                             float headshotMult = 1.5f;
                             if (taczGetExtraDamageMethod != null && taczGetHeadShotMultiplierMethod != null) {
-                                Object extraDamage = taczGetExtraDamageMethod.invoke(bulletData);
+                                Object extraDamage = safeInvoke(taczGetExtraDamageMethod, bulletData);
                                 if (extraDamage != null) {
-                                    headshotMult = (float) taczGetHeadShotMultiplierMethod.invoke(extraDamage);
+                                    headshotMult = safeInvokeOrDefault(taczGetHeadShotMultiplierMethod, extraDamage, 1.5f);
                                 }
                             }
 
                             int maxAmmo = -1;
                             String ammoId = "";
                             if (taczGetGunDataMethod != null) {
-                                Object gunData = taczGetGunDataMethod.invoke(gunIndex);
+                                Object gunData = safeInvoke(taczGetGunDataMethod, gunIndex);
                                 if (gunData != null) {
                                     // 优先使用 AttachmentDataUtils 计算包含扩容弹匣/鼓包在内的最终实际弹药容量
                                     if (taczGetAmmoCountWithAttachmentMethod != null) {
-                                        try {
-                                            maxAmmo = (int) taczGetAmmoCountWithAttachmentMethod.invoke(null, stack, gunData);
-                                        } catch (Throwable ignored) {}
+                                        maxAmmo = safeInvokeOrDefault(taczGetAmmoCountWithAttachmentMethod, null, -1, stack, gunData);
                                     }
                                     if (maxAmmo <= 0 && taczGetAmmoAmountMethod != null) {
-                                        maxAmmo = (int) taczGetAmmoAmountMethod.invoke(gunData);
+                                        maxAmmo = safeInvokeOrDefault(taczGetAmmoAmountMethod, gunData, -1);
                                     }
                                     // 获取包含配件加成后的最终实际爆头倍率
                                     if (taczGetHeadShotMultiplierWithAttachmentMethod != null) {
-                                        try {
-                                            double hm = (double) taczGetHeadShotMultiplierWithAttachmentMethod.invoke(null, stack, gunData);
-                                            headshotMult = (float) hm;
-                                        } catch (Throwable ignored) {}
+                                        double hm = safeInvokeOrDefault(taczGetHeadShotMultiplierWithAttachmentMethod, null, (double) headshotMult, stack, gunData);
+                                        headshotMult = (float) hm;
                                     }
                                     if (taczGetAmmoIdMethod != null) {
-                                        ResourceLocation ammoRes = (ResourceLocation) taczGetAmmoIdMethod.invoke(gunData);
+                                        ResourceLocation ammoRes = safeInvoke(taczGetAmmoIdMethod, gunData);
                                         if (ammoRes != null) ammoId = ammoRes.toString();
                                     }
                                     if (rpm <= 0 && taczGetRoundsPerMinuteMethod != null) {
-                                        rpm = (int) taczGetRoundsPerMinuteMethod.invoke(gunData);
+                                        rpm = safeInvokeOrDefault(taczGetRoundsPerMinuteMethod, gunData, 600);
                                     }
                                 }
                             }
@@ -480,7 +477,9 @@ public final class FirearmAdapter {
                                     bulletSpeedBlocksPerTick, speedMs, gravity, headshotMult, rpm, ammoId, fireMode, hasBulletInBarrel, attachments);
                         }
                     }
-                } catch (Throwable ignored) {}
+                    return null;
+                }, null);
+                if (status != null) return status;
             }
         }
 
@@ -494,42 +493,36 @@ public final class FirearmAdapter {
             String fireMode = "AUTO";
 
             if (pbGetFireModeInstanceMethod != null) {
-                try {
-                    Object fmi = pbGetFireModeInstanceMethod.invoke(null, stack);
-                    if (fmi != null) {
-                        if (pbGetAmmoMethod != null) {
-                            try {
-                                curAmmo = (int) pbGetAmmoMethod.invoke(null, stack, fmi);
-                            } catch (Throwable ignored) {}
-                        }
-                        if (pbFmiGetRpmMethod != null) {
-                            rpm = (int) pbFmiGetRpmMethod.invoke(fmi);
-                        }
-                        if (pbFmiGetTypeMethod != null) {
-                            Object typeObj = pbFmiGetTypeMethod.invoke(fmi);
-                            if (typeObj != null) {
-                                String typeStr = typeObj.toString().toUpperCase(Locale.ROOT);
-                                if (typeStr.contains("SINGLE") || typeStr.contains("BURST") || typeStr.contains("MANUAL")) {
-                                    fireMode = "SEMI";
-                                } else {
-                                    fireMode = "AUTO";
-                                }
+                Object fmi = safeInvoke(pbGetFireModeInstanceMethod, null, stack);
+                if (fmi != null) {
+                    if (pbGetAmmoMethod != null) {
+                        curAmmo = safeInvokeOrDefault(pbGetAmmoMethod, null, -1, stack, fmi);
+                    }
+                    if (pbFmiGetRpmMethod != null) {
+                        rpm = safeInvokeOrDefault(pbFmiGetRpmMethod, fmi, 650);
+                    }
+                    if (pbFmiGetTypeMethod != null) {
+                        Object typeObj = safeInvoke(pbFmiGetTypeMethod, fmi);
+                        if (typeObj != null) {
+                            String typeStr = typeObj.toString().toUpperCase(Locale.ROOT);
+                            if (typeStr.contains("SINGLE") || typeStr.contains("BURST") || typeStr.contains("MANUAL")) {
+                                fireMode = "SEMI";
+                            } else {
+                                fireMode = "AUTO";
                             }
                         }
-                        if (pbGetMaxAmmoCapacityMethod != null) {
-                            maxAmmo = (int) pbGetMaxAmmoCapacityMethod.invoke(stack.getItem(), stack, fmi);
-                        }
                     }
-                } catch (Throwable ignored) {}
+                    if (pbGetMaxAmmoCapacityMethod != null) {
+                        maxAmmo = safeInvokeOrDefault(pbGetMaxAmmoCapacityMethod, stack.getItem(), -1, stack, fmi);
+                    }
+                }
             }
             if (curAmmo < 0 && tag != null) {
                 if (tag.contains("ammo")) curAmmo = tag.getInt("ammo");
                 else if (tag.contains("Ammo")) curAmmo = tag.getInt("Ammo");
             }
             if (maxAmmo < 0 && pbGetMaxAmmoCapacityMethod != null) {
-                try {
-                    maxAmmo = (int) pbGetMaxAmmoCapacityMethod.invoke(stack.getItem(), stack, null);
-                } catch (Throwable ignored) {}
+                maxAmmo = safeInvokeOrDefault(pbGetMaxAmmoCapacityMethod, stack.getItem(), -1, stack, (Object) null);
             }
 
             Item item = stack.getItem();
@@ -545,37 +538,33 @@ public final class FirearmAdapter {
             int curAmmo = (tag != null && tag.contains("AmmoCount")) ? tag.getInt("AmmoCount") : -1;
             int maxAmmo = -1;
             if (scgunsGetMaxAmmoMethod != null) {
-                try {
-                    maxAmmo = (int) scgunsGetMaxAmmoMethod.invoke(null, stack);
-                } catch (Throwable ignored) {}
+                maxAmmo = safeInvokeOrDefault(scgunsGetMaxAmmoMethod, null, -1, stack);
             }
             int rpm = 600;
             String fireMode = "AUTO";
-            try {
-                if (scgunsGetModifiedGunMethod != null && scgunsGunItemClass.isInstance(stack.getItem())) {
-                    Object gun = scgunsGetModifiedGunMethod.invoke(stack.getItem(), stack);
-                    if (gun != null && scgunsGetGeneralMethod != null) {
-                        Object general = scgunsGetGeneralMethod.invoke(gun);
-                        if (general != null) {
-                            if (scgunsGenGetRateMethod != null) {
-                                int rateTicks = (int) scgunsGenGetRateMethod.invoke(general);
-                                if (rateTicks > 0) rpm = Math.round(1200.0f / rateTicks);
-                            }
-                            boolean isAuto = true;
-                            if (scgunsGenIsAutoMethod != null) {
-                                isAuto = (boolean) scgunsGenIsAutoMethod.invoke(general);
-                            }
-                            boolean isRevolver = false;
-                            if (scgunsGenIsRevolverMethod != null) {
-                                isRevolver = (boolean) scgunsGenIsRevolverMethod.invoke(general);
-                            }
-                            if (!isAuto || isRevolver) {
-                                fireMode = "SEMI";
-                            }
+            if (scgunsGetModifiedGunMethod != null && scgunsGunItemClass.isInstance(stack.getItem())) {
+                Object gun = safeInvoke(scgunsGetModifiedGunMethod, stack.getItem(), stack);
+                if (gun != null && scgunsGetGeneralMethod != null) {
+                    Object general = safeInvoke(scgunsGetGeneralMethod, gun);
+                    if (general != null) {
+                        if (scgunsGenGetRateMethod != null) {
+                            int rateTicks = safeInvokeOrDefault(scgunsGenGetRateMethod, general, 0);
+                            if (rateTicks > 0) rpm = Math.round(1200.0f / rateTicks);
+                        }
+                        boolean isAuto = true;
+                        if (scgunsGenIsAutoMethod != null) {
+                            isAuto = safeInvokeOrDefault(scgunsGenIsAutoMethod, general, true);
+                        }
+                        boolean isRevolver = false;
+                        if (scgunsGenIsRevolverMethod != null) {
+                            isRevolver = safeInvokeOrDefault(scgunsGenIsRevolverMethod, general, false);
+                        }
+                        if (!isAuto || isRevolver) {
+                            fireMode = "SEMI";
                         }
                     }
                 }
-            } catch (Throwable ignored) {}
+            }
 
             Item item = stack.getItem();
             GunMeta meta = GUN_META_CACHE.computeIfAbsent(item, FirearmAdapter::resolveGunMeta);
@@ -595,72 +584,71 @@ public final class FirearmAdapter {
             double bulletGravity = -1.0;
             float headshotMult = -1.0f;
             String ammoId = "";
-            try {
-                if (jegGetModifiedGunMethod != null && jegGunItemClass.isInstance(stack.getItem())) {
-                    Object gun = jegGetModifiedGunMethod.invoke(stack.getItem(), stack);
-                    if (gun != null) {
-                        if (jegGetGeneralMethod != null) {
-                            Object general = jegGetGeneralMethod.invoke(gun);
-                            if (general != null) {
-                                if (jegGenGetRateMethod != null) {
-                                    int rateTicks = (int) jegGenGetRateMethod.invoke(general);
-                                    if (rateTicks > 0) rpm = Math.round(1200.0f / rateTicks);
-                                }
-                                if (jegGenGetFireModeMethod != null) {
-                                    Object fmObj = jegGenGetFireModeMethod.invoke(general);
-                                    if (fmObj != null) {
-                                        String fmStr = "";
-                                        try {
-                                            if (jegFireModeGetIdMethod != null) {
-                                                Object idObj = jegFireModeGetIdMethod.invoke(fmObj);
-                                                if (idObj != null) fmStr = idObj.toString().toLowerCase(Locale.ROOT);
-                                            } else {
-                                                Method getIdMethod = fmObj.getClass().getMethod("getId");
-                                                Object idObj = getIdMethod.invoke(fmObj);
-                                                if (idObj != null) fmStr = idObj.toString().toLowerCase(Locale.ROOT);
-                                            }
-                                        } catch (Throwable t) {
-                                            fmStr = fmObj.toString().toLowerCase(Locale.ROOT);
-                                        }
-                                        if (fmStr.contains("release_fire") || fmStr.contains("release")) {
-                                            fireMode = "RELEASE_FIRE";
-                                        } else if (fmStr.contains("semi") || fmStr.contains("burst") || fmStr.contains("single")) {
-                                            fireMode = "SEMI";
-                                        } else {
-                                            fireMode = "AUTO";
-                                        }
+            if (jegGetModifiedGunMethod != null && jegGunItemClass.isInstance(stack.getItem())) {
+                Object gun = safeInvoke(jegGetModifiedGunMethod, stack.getItem(), stack);
+                if (gun != null) {
+                    if (jegGetGeneralMethod != null) {
+                        Object general = safeInvoke(jegGetGeneralMethod, gun);
+                        if (general != null) {
+                            if (jegGenGetRateMethod != null) {
+                                int rateTicks = safeInvokeOrDefault(jegGenGetRateMethod, general, 0);
+                                if (rateTicks > 0) rpm = Math.round(1200.0f / rateTicks);
+                            }
+                            if (jegGenGetFireModeMethod != null) {
+                                Object fmObj = safeInvoke(jegGenGetFireModeMethod, general);
+                                if (fmObj != null) {
+                                    String fmStr = "";
+                                    if (jegFireModeGetIdMethod != null) {
+                                        Object idObj = safeInvoke(jegFireModeGetIdMethod, fmObj);
+                                        if (idObj != null) fmStr = idObj.toString().toLowerCase(Locale.ROOT);
+                                    } else {
+                                        Method getIdMethod = safeGetMethod(fmObj.getClass(), "getId");
+                                        Object idObj = safeInvoke(getIdMethod, fmObj);
+                                        if (idObj != null) fmStr = idObj.toString().toLowerCase(Locale.ROOT);
+                                    }
+                                    if (fmStr.isEmpty()) {
+                                        fmStr = fmObj.toString().toLowerCase(Locale.ROOT);
+                                    }
+                                    if (fmStr.contains("release_fire") || fmStr.contains("release")) {
+                                        fireMode = "RELEASE_FIRE";
+                                    } else if (fmStr.contains("semi") || fmStr.contains("burst") || fmStr.contains("single")) {
+                                        fireMode = "SEMI";
+                                    } else {
+                                        fireMode = "AUTO";
                                     }
                                 }
                             }
                         }
-                        if (jegGetProjectileMethod != null) {
-                            Object proj = jegGetProjectileMethod.invoke(gun);
-                            if (proj != null) {
-                                if (jegProjGetSpeedMethod != null) {
-                                    bulletSpeed = ((Number) jegProjGetSpeedMethod.invoke(proj)).floatValue();
-                                }
-                                if (jegProjIsGravityMethod != null) {
-                                    boolean hasGrav = (boolean) jegProjIsGravityMethod.invoke(proj);
-                                    bulletGravity = hasGrav ? 0.015 : 0.003;
-                                }
-                                if (jegProjGetHeadshotMultiplierMethod != null) {
-                                    headshotMult = ((Number) jegProjGetHeadshotMultiplierMethod.invoke(proj)).floatValue();
-                                }
-                                if (jegProjGetItemMethod != null) {
-                                    Object ammoRes = jegProjGetItemMethod.invoke(proj);
-                                    if (ammoRes != null) ammoId = ammoRes.toString();
-                                }
+                    }
+                    if (jegGetProjectileMethod != null) {
+                        Object proj = safeInvoke(jegGetProjectileMethod, gun);
+                        if (proj != null) {
+                            if (jegProjGetSpeedMethod != null) {
+                                Number speedNum = safeInvoke(jegProjGetSpeedMethod, proj);
+                                if (speedNum != null) bulletSpeed = speedNum.floatValue();
                             }
-                        }
-                        if (jegGetReloadsMethod != null && jegReloadsGetMaxAmmoMethod != null) {
-                            Object reloads = jegGetReloadsMethod.invoke(gun);
-                            if (reloads != null) {
-                                maxAmmo = (int) jegReloadsGetMaxAmmoMethod.invoke(reloads);
+                            if (jegProjIsGravityMethod != null) {
+                                boolean hasGrav = safeInvokeOrDefault(jegProjIsGravityMethod, proj, false);
+                                bulletGravity = hasGrav ? 0.015 : 0.003;
+                            }
+                            if (jegProjGetHeadshotMultiplierMethod != null) {
+                                Number hsNum = safeInvoke(jegProjGetHeadshotMultiplierMethod, proj);
+                                if (hsNum != null) headshotMult = hsNum.floatValue();
+                            }
+                            if (jegProjGetItemMethod != null) {
+                                Object ammoRes = safeInvoke(jegProjGetItemMethod, proj);
+                                if (ammoRes != null) ammoId = ammoRes.toString();
                             }
                         }
                     }
+                    if (jegGetReloadsMethod != null && jegReloadsGetMaxAmmoMethod != null) {
+                        Object reloads = safeInvoke(jegGetReloadsMethod, gun);
+                        if (reloads != null) {
+                            maxAmmo = safeInvokeOrDefault(jegReloadsGetMaxAmmoMethod, reloads, -1);
+                        }
+                    }
                 }
-            } catch (Throwable ignored) {}
+            }
 
             Item item = stack.getItem();
             GunMeta meta = GUN_META_CACHE.computeIfAbsent(item, FirearmAdapter::resolveGunMeta);
@@ -749,13 +737,11 @@ public final class FirearmAdapter {
         if (isTaczGun(mainHand)) {
             initTaczReflection();
             if (taczAvailable && taczFromLivingEntityMethod != null && taczGetSynIsAimingMethod != null) {
-                try {
-                    Object operator = taczFromLivingEntityMethod.invoke(null, player);
-                    if (operator != null) {
-                        Object res = taczGetSynIsAimingMethod.invoke(operator);
-                        if (res instanceof Boolean b) return b;
-                    }
-                } catch (Throwable ignored) {}
+                Object operator = safeInvoke(taczFromLivingEntityMethod, null, player);
+                if (operator != null) {
+                    Boolean res = safeInvoke(taczGetSynIsAimingMethod, operator);
+                    if (res != null) return res;
+                }
             }
             return false;
         }
@@ -764,12 +750,10 @@ public final class FirearmAdapter {
         if (isJegGun(mainHand)) {
             initJegReflection();
             if (jegAimingHandlerClass != null && jegGetAimingHandlerMethod != null && jegIsAimingMethod != null) {
-                try {
-                    Object handler = jegGetAimingHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        return (boolean) jegIsAimingMethod.invoke(handler);
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(jegGetAimingHandlerMethod, null);
+                if (handler != null) {
+                    return safeInvokeOrDefault(jegIsAimingMethod, handler, false);
+                }
             }
         }
 
@@ -777,12 +761,10 @@ public final class FirearmAdapter {
         if (isScorchedGun(mainHand)) {
             initScgunsReflection();
             if (scgunsAimingHandlerClass != null && scgunsGetAimingHandlerMethod != null && scgunsIsAimingMethod != null) {
-                try {
-                    Object handler = scgunsGetAimingHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        return (boolean) scgunsIsAimingMethod.invoke(handler);
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(scgunsGetAimingHandlerMethod, null);
+                if (handler != null) {
+                    return safeInvokeOrDefault(scgunsIsAimingMethod, handler, false);
+                }
             }
         }
 
@@ -790,12 +772,10 @@ public final class FirearmAdapter {
         if (isCgmGun(mainHand)) {
             initCgmReflection();
             if (cgmAimingHandlerClass != null && cgmGetAimingHandlerMethod != null && cgmIsAimingMethod != null) {
-                try {
-                    Object handler = cgmGetAimingHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        return (boolean) cgmIsAimingMethod.invoke(handler);
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(cgmGetAimingHandlerMethod, null);
+                if (handler != null) {
+                    return safeInvokeOrDefault(cgmIsAimingMethod, handler, false);
+                }
             }
         }
 
@@ -816,13 +796,11 @@ public final class FirearmAdapter {
         if (isTaczGun(mainHand)) {
             initTaczReflection();
             if (taczAvailable && taczFromLivingEntityMethod != null && taczGetSynIsBoltingMethod != null) {
-                try {
-                    Object operator = taczFromLivingEntityMethod.invoke(null, player);
-                    if (operator != null) {
-                        Object res = taczGetSynIsBoltingMethod.invoke(operator);
-                        if (res instanceof Boolean b) return b;
-                    }
-                } catch (Throwable ignored) {}
+                Object operator = safeInvoke(taczFromLivingEntityMethod, null, player);
+                if (operator != null) {
+                    Boolean res = safeInvoke(taczGetSynIsBoltingMethod, operator);
+                    if (res != null) return res;
+                }
             }
         }
         return false;
@@ -839,16 +817,14 @@ public final class FirearmAdapter {
         if (isTaczGun(mainHand)) {
             initTaczReflection();
             if (taczAvailable && taczFromLivingEntityMethod != null && taczGetSynReloadStateMethod != null && taczGetCountDownMethod != null) {
-                try {
-                    Object operator = taczFromLivingEntityMethod.invoke(null, player);
-                    if (operator != null) {
-                        Object reloadState = taczGetSynReloadStateMethod.invoke(operator);
-                        if (reloadState != null) {
-                            long countDown = (long) taczGetCountDownMethod.invoke(reloadState);
-                            return countDown > 0L;
-                        }
+                Object operator = safeInvoke(taczFromLivingEntityMethod, null, player);
+                if (operator != null) {
+                    Object reloadState = safeInvoke(taczGetSynReloadStateMethod, operator);
+                    if (reloadState != null) {
+                        Long countDown = safeInvoke(taczGetCountDownMethod, reloadState);
+                        return countDown != null && countDown > 0L;
                     }
-                } catch (Throwable ignored) {}
+                }
             }
             return false;
         }
@@ -857,18 +833,16 @@ public final class FirearmAdapter {
         if (isPointBlankGun(mainHand)) {
             initPbReflection();
             if (pbGunClientStateClass != null && pbGetClientStateMethod != null) {
-                try {
+                Boolean isPbReloading = invokeSilently(() -> {
                     int sel = player.getInventory().selected;
                     if (pbResolveSlotIndexMethod != null) {
-                        try {
-                            int resolved = (int) pbResolveSlotIndexMethod.invoke(null, player, mainHand);
-                            if (resolved >= 0) sel = resolved;
-                        } catch (Throwable ignored) {}
+                        int resolved = safeInvokeOrDefault(pbResolveSlotIndexMethod, null, -1, player, mainHand);
+                        if (resolved >= 0) sel = resolved;
                     }
-                    Object state = pbGetClientStateMethod.invoke(null, player, mainHand, sel, false);
+                    Object state = safeInvoke(pbGetClientStateMethod, null, player, mainHand, sel, false);
                     if (state != null) {
-                        boolean reloading = (pbStateIsReloadingMethod != null) && (boolean) pbStateIsReloadingMethod.invoke(state);
-                        boolean preparing = (pbStateIsPreparingReloadMethod != null) && (boolean) pbStateIsPreparingReloadMethod.invoke(state);
+                        boolean reloading = (pbStateIsReloadingMethod != null) && safeInvokeOrDefault(pbStateIsReloadingMethod, state, false);
+                        boolean preparing = (pbStateIsPreparingReloadMethod != null) && safeInvokeOrDefault(pbStateIsPreparingReloadMethod, state, false);
                         if (reloading || preparing) {
                             return true;
                         }
@@ -876,20 +850,22 @@ public final class FirearmAdapter {
                     // 全局槽位防漏扫描：遍历 0~8 号热键栏与 40 号副手
                     for (int s = 0; s <= 8; s++) {
                         if (s == sel) continue;
-                        Object altState = pbGetClientStateMethod.invoke(null, player, mainHand, s, false);
+                        Object altState = safeInvoke(pbGetClientStateMethod, null, player, mainHand, s, false);
                         if (altState != null) {
-                            boolean reloading = (pbStateIsReloadingMethod != null) && (boolean) pbStateIsReloadingMethod.invoke(altState);
-                            boolean preparing = (pbStateIsPreparingReloadMethod != null) && (boolean) pbStateIsPreparingReloadMethod.invoke(altState);
+                            boolean reloading = (pbStateIsReloadingMethod != null) && safeInvokeOrDefault(pbStateIsReloadingMethod, altState, false);
+                            boolean preparing = (pbStateIsPreparingReloadMethod != null) && safeInvokeOrDefault(pbStateIsPreparingReloadMethod, altState, false);
                             if (reloading || preparing) return true;
                         }
                     }
-                    Object offState = pbGetClientStateMethod.invoke(null, player, mainHand, 40, true);
+                    Object offState = safeInvoke(pbGetClientStateMethod, null, player, mainHand, 40, true);
                     if (offState != null) {
-                        boolean reloading = (pbStateIsReloadingMethod != null) && (boolean) pbStateIsReloadingMethod.invoke(offState);
-                        boolean preparing = (pbStateIsPreparingReloadMethod != null) && (boolean) pbStateIsPreparingReloadMethod.invoke(offState);
+                        boolean reloading = (pbStateIsReloadingMethod != null) && safeInvokeOrDefault(pbStateIsReloadingMethod, offState, false);
+                        boolean preparing = (pbStateIsPreparingReloadMethod != null) && safeInvokeOrDefault(pbStateIsPreparingReloadMethod, offState, false);
                         if (reloading || preparing) return true;
                     }
-                } catch (Throwable ignored) {}
+                    return false;
+                }, false);
+                if (Boolean.TRUE.equals(isPbReloading)) return true;
             }
             CompoundTag tag = mainHand.getTag();
             if (tag != null) {
@@ -902,13 +878,11 @@ public final class FirearmAdapter {
         if (isJegGun(mainHand)) {
             initJegReflection();
             if (jegReloadHandlerClass != null && jegGetReloadHandlerMethod != null && jegGetReloadTimerMethod != null) {
-                try {
-                    Object handler = jegGetReloadHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        int timer = (int) jegGetReloadTimerMethod.invoke(handler);
-                        if (timer > 0) return true;
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(jegGetReloadHandlerMethod, null);
+                if (handler != null) {
+                    int timer = safeInvokeOrDefault(jegGetReloadTimerMethod, handler, 0);
+                    if (timer > 0) return true;
+                }
             }
             CompoundTag tag = mainHand.getTag();
             if (tag != null && tag.contains("IsReloading") && tag.getBoolean("IsReloading")) {
@@ -920,13 +894,11 @@ public final class FirearmAdapter {
         if (isScorchedGun(mainHand)) {
             initScgunsReflection();
             if (scgunsReloadHandlerClass != null && scgunsGetReloadHandlerMethod != null && scgunsGetReloadTimerMethod != null) {
-                try {
-                    Object handler = scgunsGetReloadHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        int timer = (int) scgunsGetReloadTimerMethod.invoke(handler);
-                        if (timer > 0) return true;
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(scgunsGetReloadHandlerMethod, null);
+                if (handler != null) {
+                    int timer = safeInvokeOrDefault(scgunsGetReloadTimerMethod, handler, 0);
+                    if (timer > 0) return true;
+                }
             }
             CompoundTag tag = mainHand.getTag();
             if (tag != null && tag.contains("IsReloading") && tag.getBoolean("IsReloading")) {
@@ -938,13 +910,11 @@ public final class FirearmAdapter {
         if (isCgmGun(mainHand)) {
             initCgmReflection();
             if (cgmReloadHandlerClass != null && cgmGetReloadHandlerMethod != null && cgmGetReloadTimerMethod != null) {
-                try {
-                    Object handler = cgmGetReloadHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        int timer = (int) cgmGetReloadTimerMethod.invoke(handler);
-                        return timer > 0;
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(cgmGetReloadHandlerMethod, null);
+                if (handler != null) {
+                    int timer = safeInvokeOrDefault(cgmGetReloadTimerMethod, handler, 0);
+                    return timer > 0;
+                }
             }
         }
 
@@ -964,10 +934,8 @@ public final class FirearmAdapter {
             if (taczAvailable) {
                 // 1.1 权威 API: 判定当前枪械是否满足换弹条件 (含背包弹药与弹药箱检测)
                 if (taczCanReloadMethod != null) {
-                    try {
-                        boolean canReload = (boolean) taczCanReloadMethod.invoke(stack.getItem(), player, stack);
-                        if (canReload) return true;
-                    } catch (Throwable ignored) {}
+                    boolean canReload = safeInvokeOrDefault(taczCanReloadMethod, stack.getItem(), false, player, stack);
+                    if (canReload) return true;
                 }
 
                 // 1.2 穿透检测玩家背包：针对 IAmmo 与 IAmmoBox (弹药箱) 精准识别
@@ -979,21 +947,17 @@ public final class FirearmAdapter {
 
                     // 检测是否为匹配子弹 (IAmmo)
                     if (taczIAmmoClass != null && taczIAmmoClass.isInstance(invStack.getItem())) {
-                        try {
-                            if (taczIsAmmoOfGunMethod != null && (boolean) taczIsAmmoOfGunMethod.invoke(invStack.getItem(), stack, invStack)) {
-                                return true;
-                            }
-                        } catch (Throwable ignored) {}
+                        if (taczIsAmmoOfGunMethod != null && safeInvokeOrDefault(taczIsAmmoOfGunMethod, invStack.getItem(), false, stack, invStack)) {
+                            return true;
+                        }
                     }
 
                     // 检测是否为匹配弹药箱 (IAmmoBox)，严格校验余弹数 > 0
                     if (taczIAmmoBoxClass != null && taczIAmmoBoxClass.isInstance(invStack.getItem())) {
-                        try {
-                            if (taczIsAmmoBoxOfGunMethod != null && (boolean) taczIsAmmoBoxOfGunMethod.invoke(invStack.getItem(), stack, invStack)) {
-                                int count = (taczGetAmmoCountMethod != null) ? (int) taczGetAmmoCountMethod.invoke(invStack.getItem(), invStack) : invStack.getCount();
-                                if (count > 0) return true;
-                            }
-                        } catch (Throwable ignored) {}
+                        if (taczIsAmmoBoxOfGunMethod != null && safeInvokeOrDefault(taczIsAmmoBoxOfGunMethod, invStack.getItem(), false, stack, invStack)) {
+                            int count = (taczGetAmmoCountMethod != null) ? safeInvokeOrDefault(taczGetAmmoCountMethod, invStack.getItem(), invStack.getCount(), invStack) : invStack.getCount();
+                            if (count > 0) return true;
+                        }
                     }
 
                     // 注册名兜底匹配
@@ -1011,31 +975,25 @@ public final class FirearmAdapter {
             initPbReflection();
             Object fmi = null;
             if (pbGetFireModeInstanceMethod != null) {
-                try {
-                    fmi = pbGetFireModeInstanceMethod.invoke(null, stack);
-                } catch (Throwable ignored) {}
+                fmi = safeInvoke(pbGetFireModeInstanceMethod, null, stack);
             }
             if (pbCanReloadGunMethod != null) {
-                try {
-                    int canReload = (int) pbCanReloadGunMethod.invoke(stack.getItem(), stack, player, fmi);
-                    if (canReload > 0) return true;
-                } catch (Throwable ignored) {}
+                int canReload = safeInvokeOrDefault(pbCanReloadGunMethod, stack.getItem(), 0, stack, player, fmi);
+                if (canReload > 0) return true;
             }
             if (pbGetCompatibleAmmoMethod != null) {
-                try {
-                    Object compAmmoList = pbGetCompatibleAmmoMethod.invoke(stack.getItem());
-                    if (compAmmoList instanceof Collection<?> collection) {
-                        for (Object ammoItemObj : collection) {
-                            if (ammoItemObj instanceof Item ammoItem) {
-                                for (ItemStack invStack : player.getInventory().items) {
-                                    if (!invStack.isEmpty() && invStack.getCount() > 0 && invStack.getItem() == ammoItem) {
-                                        return true;
-                                    }
+                Object compAmmoList = safeInvoke(pbGetCompatibleAmmoMethod, stack.getItem());
+                if (compAmmoList instanceof Collection<?> collection) {
+                    for (Object ammoItemObj : collection) {
+                        if (ammoItemObj instanceof Item ammoItem) {
+                            for (ItemStack invStack : player.getInventory().items) {
+                                if (!invStack.isEmpty() && invStack.getCount() > 0 && invStack.getItem() == ammoItem) {
+                                    return true;
                                 }
                             }
                         }
                     }
-                } catch (Throwable ignored) {}
+                }
             }
             // 退避兜底：扫描背包中是否有 Point Blank 弹药物品
             for (ItemStack invStack : player.getInventory().items) {
@@ -1056,16 +1014,14 @@ public final class FirearmAdapter {
         if (isScorchedGun(stack)) {
             initScgunsReflection();
             if (scgunsFindAmmoStackMethod != null && scgunsGetCurrentAmmoItemMethod != null && scgunsGetModifiedGunMethod != null) {
-                try {
-                    Object gun = scgunsGetModifiedGunMethod.invoke(stack.getItem(), stack);
-                    if (gun != null) {
-                        Item ammoItem = (Item) scgunsGetCurrentAmmoItemMethod.invoke(gun, stack);
-                        if (ammoItem != null) {
-                            ItemStack[] stacks = (ItemStack[]) scgunsFindAmmoStackMethod.invoke(null, player, ammoItem);
-                            if (stacks != null && stacks.length > 0) return true;
-                        }
+                Object gun = safeInvoke(scgunsGetModifiedGunMethod, stack.getItem(), stack);
+                if (gun != null) {
+                    Item ammoItem = safeInvoke(scgunsGetCurrentAmmoItemMethod, gun, stack);
+                    if (ammoItem != null) {
+                        ItemStack[] stacks = safeInvoke(scgunsFindAmmoStackMethod, null, player, ammoItem);
+                        if (stacks != null && stacks.length > 0) return true;
                     }
-                } catch (Throwable ignored) {}
+                }
             }
             // 退避兜底：检查背包中属于 scguns 命名空间的物品
             for (ItemStack invStack : player.getInventory().items) {
@@ -1089,41 +1045,31 @@ public final class FirearmAdapter {
             ResourceLocation projItem = null;
 
             if (jegGetModifiedGunMethod != null) {
-                try {
-                    Object gun = jegGetModifiedGunMethod.invoke(stack.getItem(), stack);
-                    if (gun != null) {
-                        if (jegGetReloadsMethod != null && jegReloadsGetReloadItemMethod != null) {
-                            try {
-                                Object reloads = jegGetReloadsMethod.invoke(gun);
-                                if (reloads != null) {
-                                    reloadItem = (ResourceLocation) jegReloadsGetReloadItemMethod.invoke(reloads);
-                                }
-                            } catch (Throwable ignored) {}
-                        }
-                        if (jegGetProjectileMethod != null && jegProjGetItemMethod != null) {
-                            try {
-                                Object proj = jegGetProjectileMethod.invoke(gun);
-                                if (proj != null) {
-                                    projItem = (ResourceLocation) jegProjGetItemMethod.invoke(proj);
-                                }
-                            } catch (Throwable ignored) {}
+                Object gun = safeInvoke(jegGetModifiedGunMethod, stack.getItem(), stack);
+                if (gun != null) {
+                    if (jegGetReloadsMethod != null && jegReloadsGetReloadItemMethod != null) {
+                        Object reloads = safeInvoke(jegGetReloadsMethod, gun);
+                        if (reloads != null) {
+                            reloadItem = safeInvoke(jegReloadsGetReloadItemMethod, reloads);
                         }
                     }
-                } catch (Throwable ignored) {}
+                    if (jegGetProjectileMethod != null && jegProjGetItemMethod != null) {
+                        Object proj = safeInvoke(jegGetProjectileMethod, gun);
+                        if (proj != null) {
+                            projItem = safeInvoke(jegProjGetItemMethod, proj);
+                        }
+                    }
+                }
             }
 
             if (jegFindAmmoStackMethod != null) {
                 if (reloadItem != null) {
-                    try {
-                        ItemStack[] stacks = (ItemStack[]) jegFindAmmoStackMethod.invoke(null, player, reloadItem);
-                        if (stacks != null && stacks.length > 0) return true;
-                    } catch (Throwable ignored) {}
+                    ItemStack[] stacks = safeInvoke(jegFindAmmoStackMethod, null, player, reloadItem);
+                    if (stacks != null && stacks.length > 0) return true;
                 }
                 if (projItem != null) {
-                    try {
-                        ItemStack[] stacks = (ItemStack[]) jegFindAmmoStackMethod.invoke(null, player, projItem);
-                        if (stacks != null && stacks.length > 0) return true;
-                    } catch (Throwable ignored) {}
+                    ItemStack[] stacks = safeInvoke(jegFindAmmoStackMethod, null, player, projItem);
+                    if (stacks != null && stacks.length > 0) return true;
                 }
             }
 
@@ -1196,36 +1142,30 @@ public final class FirearmAdapter {
         if (isTaczGun(mainHand)) {
             initTaczReflection();
             if (taczAvailable) {
-                try {
-                    if (player instanceof net.minecraft.client.player.LocalPlayer localPlayer &&
-                        taczClientGunOperatorClass != null && taczFromLocalPlayerMethod != null && taczClientReloadMethod != null) {
-                        Object operator = taczFromLocalPlayerMethod.invoke(null, localPlayer);
-                        if (operator != null) {
-                            taczClientReloadMethod.invoke(operator);
-                            return true;
-                        }
+                if (player instanceof net.minecraft.client.player.LocalPlayer localPlayer &&
+                    taczClientGunOperatorClass != null && taczFromLocalPlayerMethod != null && taczClientReloadMethod != null) {
+                    Object operator = safeInvoke(taczFromLocalPlayerMethod, null, localPlayer);
+                    if (operator != null) {
+                        safeInvoke(taczClientReloadMethod, operator);
+                        return true;
                     }
-                } catch (Throwable ignored) {}
+                }
 
-                try {
-                    if (taczFromLivingEntityMethod != null && taczReloadMethod != null) {
-                        Object operator = taczFromLivingEntityMethod.invoke(null, player);
-                        if (operator != null) {
-                            taczReloadMethod.invoke(operator);
-                            return true;
-                        }
+                if (taczFromLivingEntityMethod != null && taczReloadMethod != null) {
+                    Object operator = safeInvoke(taczFromLivingEntityMethod, null, player);
+                    if (operator != null) {
+                        safeInvoke(taczReloadMethod, operator);
+                        return true;
                     }
-                } catch (Throwable ignored) {}
+                }
 
-                try {
-                    if (taczReloadKeyField != null) {
-                        KeyMapping reloadKey = (KeyMapping) taczReloadKeyField.get(null);
-                        if (reloadKey != null) {
-                            KeyMapping.click(reloadKey.getKey());
-                            return true;
-                        }
+                if (taczReloadKeyField != null) {
+                    KeyMapping reloadKey = safeGetFieldValue(taczReloadKeyField, null);
+                    if (reloadKey != null) {
+                        KeyMapping.click(reloadKey.getKey());
+                        return true;
                     }
-                } catch (Throwable ignored) {}
+                }
             }
             return false;
         }
@@ -1235,27 +1175,23 @@ public final class FirearmAdapter {
             initPbReflection();
             boolean triggered = false;
             if (pbReloadKeyField != null) {
-                try {
-                    Object lazyObj = pbReloadKeyField.get(null);
-                    if (lazyObj != null) {
-                        KeyMapping reloadKey = null;
-                        if (pbLazyGetMethod != null) {
-                            reloadKey = (KeyMapping) pbLazyGetMethod.invoke(lazyObj);
-                        } else {
-                            Method getMethod = lazyObj.getClass().getMethod("get");
-                            reloadKey = (KeyMapping) getMethod.invoke(lazyObj);
-                        }
-                        if (reloadKey != null) {
-                            KeyMapping.click(reloadKey.getKey());
-                            triggered = true;
-                        }
+                Object lazyObj = safeGetFieldValue(pbReloadKeyField, null);
+                if (lazyObj != null) {
+                    KeyMapping reloadKey = null;
+                    if (pbLazyGetMethod != null) {
+                        reloadKey = safeInvoke(pbLazyGetMethod, lazyObj);
+                    } else {
+                        Method getMethod = safeGetMethod(lazyObj.getClass(), "get");
+                        reloadKey = safeInvoke(getMethod, lazyObj);
                     }
-                } catch (Throwable ignored) {}
+                    if (reloadKey != null) {
+                        KeyMapping.click(reloadKey.getKey());
+                        triggered = true;
+                    }
+                }
             }
             if (!triggered && pbTryReloadMethod != null) {
-                try {
-                    triggered = (boolean) pbTryReloadMethod.invoke(mainHand.getItem(), player, mainHand);
-                } catch (Throwable ignored) {}
+                triggered = safeInvokeOrDefault(pbTryReloadMethod, mainHand.getItem(), false, player, mainHand);
             }
             return triggered;
         }
@@ -1268,22 +1204,18 @@ public final class FirearmAdapter {
                 tag.putBoolean("IsReloading", true);
             }
             if (jegReloadHandlerClass != null && jegGetReloadHandlerMethod != null && jegSetReloadingMethod != null) {
-                try {
-                    Object handler = jegGetReloadHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        jegSetReloadingMethod.invoke(handler, true);
-                        return true;
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(jegGetReloadHandlerMethod, null);
+                if (handler != null) {
+                    safeInvoke(jegSetReloadingMethod, handler, true);
+                    return true;
+                }
             }
             if (jegKeyReloadField != null) {
-                try {
-                    KeyMapping reloadKey = (KeyMapping) jegKeyReloadField.get(null);
-                    if (reloadKey != null) {
-                        KeyMapping.click(reloadKey.getKey());
-                        return true;
-                    }
-                } catch (Throwable ignored) {}
+                KeyMapping reloadKey = safeGetFieldValue(jegKeyReloadField, null);
+                if (reloadKey != null) {
+                    KeyMapping.click(reloadKey.getKey());
+                    return true;
+                }
             }
             return true;
         }
@@ -1292,21 +1224,17 @@ public final class FirearmAdapter {
         if (isScorchedGun(mainHand)) {
             initScgunsReflection();
             if (scgunsKeyReloadField != null) {
-                try {
-                    KeyMapping reloadKey = (KeyMapping) scgunsKeyReloadField.get(null);
-                    if (reloadKey != null) {
-                        KeyMapping.click(reloadKey.getKey());
-                    }
-                } catch (Throwable ignored) {}
+                KeyMapping reloadKey = safeGetFieldValue(scgunsKeyReloadField, null);
+                if (reloadKey != null) {
+                    KeyMapping.click(reloadKey.getKey());
+                }
             }
             if (scgunsReloadHandlerClass != null && scgunsGetReloadHandlerMethod != null && scgunsSetReloadingMethod != null) {
-                try {
-                    Object handler = scgunsGetReloadHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        scgunsSetReloadingMethod.invoke(handler, true);
-                        return true;
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(scgunsGetReloadHandlerMethod, null);
+                if (handler != null) {
+                    safeInvoke(scgunsSetReloadingMethod, handler, true);
+                    return true;
+                }
             }
             return true;
         }
@@ -1315,13 +1243,11 @@ public final class FirearmAdapter {
         if (isCgmGun(mainHand)) {
             initCgmReflection();
             if (cgmReloadHandlerClass != null && cgmGetReloadHandlerMethod != null && cgmSetReloadingMethod != null) {
-                try {
-                    Object handler = cgmGetReloadHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        cgmSetReloadingMethod.invoke(handler, true);
-                        return true;
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(cgmGetReloadHandlerMethod, null);
+                if (handler != null) {
+                    safeInvoke(cgmSetReloadingMethod, handler, true);
+                    return true;
+                }
             }
         }
 
@@ -1339,20 +1265,18 @@ public final class FirearmAdapter {
             if (tag != null && (tag.contains("scguns:IsReloading") || tag.contains("IsReloading"))) {
                 boolean isRel = tag.getBoolean("scguns:IsReloading") || tag.getBoolean("IsReloading");
                 if (isRel) {
-                    try {
-                        if (scgunsGetModifiedGunMethod != null && scgunsGetReloadsMethod != null && scgunsReloadsGetReloadTypeMethod != null) {
-                            Object gun = scgunsGetModifiedGunMethod.invoke(stack.getItem(), stack);
-                            if (gun != null) {
-                                Object reloads = scgunsGetReloadsMethod.invoke(gun);
-                                if (reloads != null) {
-                                    Object rtype = scgunsReloadsGetReloadTypeMethod.invoke(reloads);
-                                    if (rtype != null && (rtype == scgunsReloadTypeManualObj || rtype.toString().contains("MANUAL"))) {
-                                        return true;
-                                    }
+                    if (scgunsGetModifiedGunMethod != null && scgunsGetReloadsMethod != null && scgunsReloadsGetReloadTypeMethod != null) {
+                        Object gun = safeInvoke(scgunsGetModifiedGunMethod, stack.getItem(), stack);
+                        if (gun != null) {
+                            Object reloads = safeInvoke(scgunsGetReloadsMethod, gun);
+                            if (reloads != null) {
+                                Object rtype = safeInvoke(scgunsReloadsGetReloadTypeMethod, reloads);
+                                if (rtype != null && (rtype == scgunsReloadTypeManualObj || rtype.toString().contains("MANUAL"))) {
+                                    return true;
                                 }
                             }
                         }
-                    } catch (Throwable ignored) {}
+                    }
                     if (tag.contains("IsManualReload") && tag.getBoolean("IsManualReload")) {
                         return true;
                     }
@@ -1371,12 +1295,10 @@ public final class FirearmAdapter {
         if (isScorchedGun(mainHand)) {
             initScgunsReflection();
             if (scgunsReloadHandlerClass != null && scgunsGetReloadHandlerMethod != null && scgunsSetReloadingMethod != null) {
-                try {
-                    Object handler = scgunsGetReloadHandlerMethod.invoke(null);
-                    if (handler != null) {
-                        scgunsSetReloadingMethod.invoke(handler, false);
-                    }
-                } catch (Throwable ignored) {}
+                Object handler = safeInvoke(scgunsGetReloadHandlerMethod, null);
+                if (handler != null) {
+                    safeInvoke(scgunsSetReloadingMethod, handler, false);
+                }
             }
             CompoundTag tag = mainHand.getTag();
             if (tag != null) {
@@ -1402,15 +1324,13 @@ public final class FirearmAdapter {
         if (isTacz || !shoot) {
             initTaczReflection();
             if (taczAvailable && taczShootControllerTickMethod != null) {
-                try {
-                    taczShootControllerTickMethod.invoke(null, shoot);
-                    if (taczShootKeyField != null) {
-                        KeyMapping shootKey = (KeyMapping) taczShootKeyField.get(null);
-                        if (shootKey != null) {
-                            KeyMapping.set(shootKey.getKey(), shoot);
-                        }
+                safeInvoke(taczShootControllerTickMethod, null, shoot);
+                if (taczShootKeyField != null) {
+                    KeyMapping shootKey = safeGetFieldValue(taczShootKeyField, null);
+                    if (shootKey != null) {
+                        KeyMapping.set(shootKey.getKey(), shoot);
                     }
-                } catch (Throwable ignored) {}
+                }
             }
         }
 
@@ -1423,12 +1343,10 @@ public final class FirearmAdapter {
             if (isJegGun(mainHand)) {
                 initJegReflection();
                 if (jegGetShootMappingMethod != null) {
-                    try {
-                        KeyMapping jegShootKey = (KeyMapping) jegGetShootMappingMethod.invoke(null);
-                        if (jegShootKey != null && mc.options != null && jegShootKey != mc.options.keyAttack) {
-                            KeyMapping.set(jegShootKey.getKey(), shoot);
-                        }
-                    } catch (Throwable ignored) {}
+                    KeyMapping jegShootKey = safeInvoke(jegGetShootMappingMethod, null);
+                    if (jegShootKey != null && mc.options != null && jegShootKey != mc.options.keyAttack) {
+                        KeyMapping.set(jegShootKey.getKey(), shoot);
+                    }
                 }
             }
         }
@@ -1448,12 +1366,10 @@ public final class FirearmAdapter {
         if (isTaczGun(stack)) {
             initTaczReflection();
             if (taczAvailable && taczGetIGunOrNullMethod != null && taczGetGunIdMethod != null) {
-                try {
-                    Object iGunObj = taczGetIGunOrNullMethod.invoke(null, stack);
-                    if (iGunObj != null) {
-                        return (ResourceLocation) taczGetGunIdMethod.invoke(iGunObj, stack);
-                    }
-                } catch (Throwable ignored) {}
+                Object iGunObj = safeInvoke(taczGetIGunOrNullMethod, null, stack);
+                if (iGunObj != null) {
+                    return safeInvoke(taczGetGunIdMethod, iGunObj, stack);
+                }
             }
         }
         CompoundTag tag = stack.getTag();
@@ -1489,9 +1405,7 @@ public final class FirearmAdapter {
         if (isJegGun(stack)) {
             initJegReflection();
             if (jegChargeTrackerClass != null && jegGetChargeProgressMethod != null) {
-                try {
-                    return (float) jegGetChargeProgressMethod.invoke(null, player, stack);
-                } catch (Throwable ignored) {}
+                return safeInvokeOrDefault(jegGetChargeProgressMethod, null, 0.0f, player, stack);
             }
         }
         return 0.0f;
@@ -1505,16 +1419,14 @@ public final class FirearmAdapter {
         if (isJegGun(stack)) {
             initJegReflection();
             if (jegGetModifiedGunMethod != null && jegGetGeneralMethod != null && jegGenGetMaxHoldFireMethod != null) {
-                try {
-                    Object gun = jegGetModifiedGunMethod.invoke(stack.getItem(), stack);
-                    if (gun != null) {
-                        Object general = jegGetGeneralMethod.invoke(gun);
-                        if (general != null) {
-                            int val = (int) jegGenGetMaxHoldFireMethod.invoke(general);
-                            if (val > 0) return val;
-                        }
+                Object gun = safeInvoke(jegGetModifiedGunMethod, stack.getItem(), stack);
+                if (gun != null) {
+                    Object general = safeInvoke(jegGetGeneralMethod, gun);
+                    if (general != null) {
+                        int val = safeInvokeOrDefault(jegGenGetMaxHoldFireMethod, general, 20);
+                        if (val > 0) return val;
                     }
-                } catch (Throwable ignored) {}
+                }
             }
         }
         return 20;
@@ -1526,19 +1438,14 @@ public final class FirearmAdapter {
     public static int getJegHoldFire() {
         initJegReflection();
         if (jegShootingHandlerClass != null && jegGetShootingHandlerMethod != null && jegGetHoldFireMethod != null) {
-            try {
-                Object handler = jegGetShootingHandlerMethod.invoke(null);
-                if (handler != null) {
-                    return (int) jegGetHoldFireMethod.invoke(handler);
-                }
-            } catch (Throwable ignored) {}
+            Object handler = safeInvoke(jegGetShootingHandlerMethod, null);
+            if (handler != null) {
+                return safeInvokeOrDefault(jegGetHoldFireMethod, handler, 0);
+            }
         }
         return 0;
     }
 
-    /**
-     * 获取武器直观易读的战术名称 (支持 ItemStack 原生物品名)
-     */
     /**
      * 获取武器简短、纯净的战术显示名称 (彻底去除 [枪械]、[枪] 等重复括号前缀与底层类名)
      */
@@ -1547,25 +1454,23 @@ public final class FirearmAdapter {
         if (isTaczGun(stack)) {
             initTaczReflection();
             if (taczAvailable && taczGetIGunOrNullMethod != null) {
-                try {
-                    Object iGun = taczGetIGunOrNullMethod.invoke(null, stack);
-                    if (iGun != null && taczGetGunIdMethod != null) {
-                        ResourceLocation gunId = (ResourceLocation) taczGetGunIdMethod.invoke(iGun, stack);
-                        if (gunId != null) {
-                            String langKey = gunId.getNamespace() + ".gun." + gunId.getPath() + ".name";
-                            if (net.minecraft.client.resources.language.I18n.exists(langKey)) {
-                                return net.minecraft.client.resources.language.I18n.get(langKey);
-                            }
-                            String altKey = "gun." + gunId.getNamespace() + "." + gunId.getPath() + ".name";
-                            if (net.minecraft.client.resources.language.I18n.exists(altKey)) {
-                                return net.minecraft.client.resources.language.I18n.get(altKey);
-                            }
-                            String tr = net.minecraft.network.chat.Component.translatable(langKey).getString();
-                            if (!tr.equals(langKey)) return tr;
-                            return formatGunId(gunId.getPath());
+                Object iGun = safeInvoke(taczGetIGunOrNullMethod, null, stack);
+                if (iGun != null && taczGetGunIdMethod != null) {
+                    ResourceLocation gunId = safeInvoke(taczGetGunIdMethod, iGun, stack);
+                    if (gunId != null) {
+                        String langKey = gunId.getNamespace() + ".gun." + gunId.getPath() + ".name";
+                        if (net.minecraft.client.resources.language.I18n.exists(langKey)) {
+                            return net.minecraft.client.resources.language.I18n.get(langKey);
                         }
+                        String altKey = "gun." + gunId.getNamespace() + "." + gunId.getPath() + ".name";
+                        if (net.minecraft.client.resources.language.I18n.exists(altKey)) {
+                            return net.minecraft.client.resources.language.I18n.get(altKey);
+                        }
+                        String tr = net.minecraft.network.chat.Component.translatable(langKey).getString();
+                        if (!tr.equals(langKey)) return tr;
+                        return formatGunId(gunId.getPath());
                     }
-                } catch (Throwable ignored) {}
+                }
             }
         }
         String hover = stack.getHoverName().getString();
@@ -1584,25 +1489,23 @@ public final class FirearmAdapter {
         if (isTaczGun(stack)) {
             initTaczReflection();
             if (taczAvailable && taczGetIGunOrNullMethod != null && taczGetAttachmentMethod != null && taczAttachmentTypeValuesMethod != null) {
-                try {
-                    Object iGun = taczGetIGunOrNullMethod.invoke(null, stack);
-                    if (iGun != null) {
-                        Object[] types = (Object[]) taczAttachmentTypeValuesMethod.invoke(null);
-                        if (types != null) {
-                            for (Object type : types) {
-                                if ("NONE".equals(type.toString())) continue;
-                                ItemStack attachStack = (ItemStack) taczGetAttachmentMethod.invoke(iGun, stack, type);
-                                if (attachStack != null && !attachStack.isEmpty()) {
-                                    String name = attachStack.getHoverName().getString();
-                                    name = name.replaceAll("^\\[.*?\\]\\s*", "").trim();
-                                    if (!name.isEmpty() && !list.contains(name)) {
-                                        list.add(name);
-                                    }
+                Object iGun = safeInvoke(taczGetIGunOrNullMethod, null, stack);
+                if (iGun != null) {
+                    Object[] types = safeInvoke(taczAttachmentTypeValuesMethod, null);
+                    if (types != null) {
+                        for (Object type : types) {
+                            if ("NONE".equals(type.toString())) continue;
+                            ItemStack attachStack = safeInvoke(taczGetAttachmentMethod, iGun, stack, type);
+                            if (attachStack != null && !attachStack.isEmpty()) {
+                                String name = attachStack.getHoverName().getString();
+                                name = name.replaceAll("^\\[.*?\\]\\s*", "").trim();
+                                if (!name.isEmpty() && !list.contains(name)) {
+                                    list.add(name);
                                 }
                             }
                         }
                     }
-                } catch (Throwable ignored) {}
+                }
             }
         }
 
@@ -1676,19 +1579,17 @@ public final class FirearmAdapter {
             // 3. 通过 TACZ 客户端索引反射读取
             initTaczReflection();
             if (taczAvailable && taczGetClientGunIndexMethod != null && taczClientGunIndexGetNameMethod != null) {
-                try {
-                    Object clientOpt = taczGetClientGunIndexMethod.invoke(null, res);
-                    if (clientOpt instanceof Optional<?> opt && opt.isPresent()) {
-                        Object clientIndex = opt.get();
-                        String nameKey = (String) taczClientGunIndexGetNameMethod.invoke(clientIndex);
-                        if (nameKey != null && !nameKey.isEmpty()) {
-                            String nameStr = net.minecraft.network.chat.Component.translatable(nameKey).getString();
-                            if (!nameStr.equals(nameKey)) {
-                                return "§6[枪械] " + nameStr;
-                            }
+                Object clientOpt = safeInvoke(taczGetClientGunIndexMethod, null, res);
+                if (clientOpt instanceof Optional<?> opt && opt.isPresent()) {
+                    Object clientIndex = opt.get();
+                    String nameKey = safeInvoke(taczClientGunIndexGetNameMethod, clientIndex);
+                    if (nameKey != null && !nameKey.isEmpty()) {
+                        String nameStr = net.minecraft.network.chat.Component.translatable(nameKey).getString();
+                        if (!nameStr.equals(nameKey)) {
+                            return "§6[枪械] " + nameStr;
                         }
                     }
-                } catch (Throwable ignored) {}
+                }
             }
             return "§6[枪械] " + formatGunId(res.getPath());
         }
@@ -1738,313 +1639,422 @@ public final class FirearmAdapter {
     private static synchronized void initTaczReflection() {
         if (taczChecked) return;
         taczChecked = true;
-        try {
-            taczIGunClass = Class.forName("com.tacz.guns.api.item.IGun");
-            taczGetIGunOrNullMethod = taczIGunClass.getMethod("getIGunOrNull", ItemStack.class);
-            taczGetGunIdMethod = taczIGunClass.getMethod("getGunId", ItemStack.class);
-            taczGetCurrentAmmoMethod = taczIGunClass.getMethod("getCurrentAmmoCount", ItemStack.class);
-            try {
-                taczGetRPMMethod = taczIGunClass.getMethod("getRPM", ItemStack.class);
-            } catch (Throwable ignored) {}
-            try {
-                taczGetFireModeMethod = taczIGunClass.getMethod("getFireMode", ItemStack.class);
-            } catch (Throwable ignored) {}
+        runSilently(() -> {
+            taczIGunClass = safeGetClass("com.tacz.guns.api.item.IGun");
+            if (taczIGunClass != null) {
+                taczGetIGunOrNullMethod = safeGetMethod(taczIGunClass, "getIGunOrNull", ItemStack.class);
+                taczGetGunIdMethod = safeGetMethod(taczIGunClass, "getGunId", ItemStack.class);
+                taczGetCurrentAmmoMethod = safeGetMethod(taczIGunClass, "getCurrentAmmoCount", ItemStack.class);
+                taczGetRPMMethod = safeGetMethod(taczIGunClass, "getRPM", ItemStack.class);
+                taczGetFireModeMethod = safeGetMethod(taczIGunClass, "getFireMode", ItemStack.class);
+            }
 
-            taczTimelessAPIClass = Class.forName("com.tacz.guns.api.TimelessAPI");
-            taczGetCommonGunIndexMethod = taczTimelessAPIClass.getMethod("getCommonGunIndex", ResourceLocation.class);
+            taczTimelessAPIClass = safeGetClass("com.tacz.guns.api.TimelessAPI");
+            if (taczTimelessAPIClass != null) {
+                taczGetCommonGunIndexMethod = safeGetMethod(taczTimelessAPIClass, "getCommonGunIndex", ResourceLocation.class);
+                taczGetClientGunIndexMethod = safeGetMethod(taczTimelessAPIClass, "getClientGunIndex", ResourceLocation.class);
+            }
 
-            taczCommonGunIndexClass = Class.forName("com.tacz.guns.resource.index.CommonGunIndex");
-            taczGetBulletDataMethod = taczCommonGunIndexClass.getMethod("getBulletData");
-            taczGetGunDataMethod = taczCommonGunIndexClass.getMethod("getGunData");
-            taczGetTypeMethod = taczCommonGunIndexClass.getMethod("getType");
+            taczCommonGunIndexClass = safeGetClass("com.tacz.guns.resource.index.CommonGunIndex");
+            if (taczCommonGunIndexClass != null) {
+                taczGetBulletDataMethod = safeGetMethod(taczCommonGunIndexClass, "getBulletData");
+                taczGetGunDataMethod = safeGetMethod(taczCommonGunIndexClass, "getGunData");
+                taczGetTypeMethod = safeGetMethod(taczCommonGunIndexClass, "getType");
+            }
 
-            taczBulletDataClass = Class.forName("com.tacz.guns.resource.pojo.data.gun.BulletData");
-            taczGetSpeedMethod = taczBulletDataClass.getMethod("getSpeed");
-            taczGetGravityMethod = taczBulletDataClass.getMethod("getGravity");
-            try {
-                taczGetExtraDamageMethod = taczBulletDataClass.getMethod("getExtraDamage");
-                taczExtraDamageClass = Class.forName("com.tacz.guns.resource.pojo.data.gun.ExtraDamage");
-                taczGetHeadShotMultiplierMethod = taczExtraDamageClass.getMethod("getHeadShotMultiplier");
-            } catch (Throwable ignored) {}
+            taczBulletDataClass = safeGetClass("com.tacz.guns.resource.pojo.data.gun.BulletData");
+            if (taczBulletDataClass != null) {
+                taczGetSpeedMethod = safeGetMethod(taczBulletDataClass, "getSpeed");
+                taczGetGravityMethod = safeGetMethod(taczBulletDataClass, "getGravity");
+                taczGetExtraDamageMethod = safeGetMethod(taczBulletDataClass, "getExtraDamage");
+                taczExtraDamageClass = safeGetClass("com.tacz.guns.resource.pojo.data.gun.ExtraDamage");
+                if (taczExtraDamageClass != null) {
+                    taczGetHeadShotMultiplierMethod = safeGetMethod(taczExtraDamageClass, "getHeadShotMultiplier");
+                }
+            }
 
-            taczGunDataClass = Class.forName("com.tacz.guns.resource.pojo.data.gun.GunData");
-            try {
-                taczGetRoundsPerMinuteMethod = taczGunDataClass.getMethod("getRoundsPerMinute");
-                taczGetAmmoAmountMethod = taczGunDataClass.getMethod("getAmmoAmount");
-                taczGetAmmoIdMethod = taczGunDataClass.getMethod("getAmmoId");
-            } catch (Throwable ignored) {}
+            taczGunDataClass = safeGetClass("com.tacz.guns.resource.pojo.data.gun.GunData");
+            if (taczGunDataClass != null) {
+                taczGetRoundsPerMinuteMethod = safeGetMethod(taczGunDataClass, "getRoundsPerMinute");
+                taczGetAmmoAmountMethod = safeGetMethod(taczGunDataClass, "getAmmoAmount");
+                taczGetAmmoIdMethod = safeGetMethod(taczGunDataClass, "getAmmoId");
+            }
 
-            try {
-                taczAttachmentDataUtilsClass = Class.forName("com.tacz.guns.util.AttachmentDataUtils");
-                taczGetAmmoCountWithAttachmentMethod = taczAttachmentDataUtilsClass.getMethod("getAmmoCountWithAttachment", ItemStack.class, taczGunDataClass);
-                taczGetHeadShotMultiplierWithAttachmentMethod = taczAttachmentDataUtilsClass.getMethod("getHeadshotMultiplier", ItemStack.class, taczGunDataClass);
-            } catch (Throwable ignored) {}
+            taczAttachmentDataUtilsClass = safeGetClass("com.tacz.guns.util.AttachmentDataUtils");
+            if (taczAttachmentDataUtilsClass != null && taczGunDataClass != null) {
+                taczGetAmmoCountWithAttachmentMethod = safeGetMethod(taczAttachmentDataUtilsClass, "getAmmoCountWithAttachment", ItemStack.class, taczGunDataClass);
+                taczGetHeadShotMultiplierWithAttachmentMethod = safeGetMethod(taczAttachmentDataUtilsClass, "getHeadshotMultiplier", ItemStack.class, taczGunDataClass);
+            }
 
-            try {
-                taczAttachmentTypeClass = Class.forName("com.tacz.guns.api.item.attachment.AttachmentType");
-                taczGetAttachmentMethod = taczIGunClass.getMethod("getAttachment", ItemStack.class, taczAttachmentTypeClass);
-                taczAttachmentTypeValuesMethod = taczAttachmentTypeClass.getMethod("values");
-            } catch (Throwable ignored) {}
+            taczAttachmentTypeClass = safeGetClass("com.tacz.guns.api.item.attachment.AttachmentType");
+            if (taczIGunClass != null && taczAttachmentTypeClass != null) {
+                taczGetAttachmentMethod = safeGetMethod(taczIGunClass, "getAttachment", ItemStack.class, taczAttachmentTypeClass);
+                taczAttachmentTypeValuesMethod = safeGetMethod(taczAttachmentTypeClass, "values");
+            }
 
-            try {
-                taczGetClientGunIndexMethod = taczTimelessAPIClass.getMethod("getClientGunIndex", ResourceLocation.class);
-                taczClientGunIndexClass = Class.forName("com.tacz.guns.resource.index.ClientGunIndex");
-                taczClientGunIndexGetNameMethod = taczClientGunIndexClass.getMethod("getName");
-            } catch (Throwable ignored) {}
+            taczClientGunIndexClass = safeGetClass("com.tacz.guns.resource.index.ClientGunIndex");
+            if (taczClientGunIndexClass != null) {
+                taczClientGunIndexGetNameMethod = safeGetMethod(taczClientGunIndexClass, "getName");
+            }
 
-            taczIGunOperatorClass = Class.forName("com.tacz.guns.api.entity.IGunOperator");
-            taczFromLivingEntityMethod = taczIGunOperatorClass.getMethod("fromLivingEntity", LivingEntity.class);
-            try {
-                taczReloadMethod = taczIGunOperatorClass.getMethod("reload");
-            } catch (Throwable ignored) {}
-            taczGetSynIsAimingMethod = taczIGunOperatorClass.getMethod("getSynIsAiming");
-            taczGetSynIsBoltingMethod = taczIGunOperatorClass.getMethod("getSynIsBolting");
-            taczGetSynReloadStateMethod = taczIGunOperatorClass.getMethod("getSynReloadState");
+            taczIGunOperatorClass = safeGetClass("com.tacz.guns.api.entity.IGunOperator");
+            if (taczIGunOperatorClass != null) {
+                taczFromLivingEntityMethod = safeGetMethod(taczIGunOperatorClass, "fromLivingEntity", LivingEntity.class);
+                taczReloadMethod = safeGetMethod(taczIGunOperatorClass, "reload");
+                taczGetSynIsAimingMethod = safeGetMethod(taczIGunOperatorClass, "getSynIsAiming");
+                taczGetSynIsBoltingMethod = safeGetMethod(taczIGunOperatorClass, "getSynIsBolting");
+                taczGetSynReloadStateMethod = safeGetMethod(taczIGunOperatorClass, "getSynReloadState");
+            }
 
-            taczReloadStateClass = Class.forName("com.tacz.guns.api.entity.ReloadState");
-            taczGetCountDownMethod = taczReloadStateClass.getMethod("getCountDown");
+            taczReloadStateClass = safeGetClass("com.tacz.guns.api.entity.ReloadState");
+            if (taczReloadStateClass != null) {
+                taczGetCountDownMethod = safeGetMethod(taczReloadStateClass, "getCountDown");
+            }
 
-            try {
-                taczAbstractGunItemClass = Class.forName("com.tacz.guns.api.item.gun.AbstractGunItem");
-                taczCanReloadMethod = taczAbstractGunItemClass.getMethod("canReload", LivingEntity.class, ItemStack.class);
-            } catch (Throwable ignored) {}
+            taczAbstractGunItemClass = safeGetClass("com.tacz.guns.api.item.gun.AbstractGunItem");
+            if (taczAbstractGunItemClass != null) {
+                taczCanReloadMethod = safeGetMethod(taczAbstractGunItemClass, "canReload", LivingEntity.class, ItemStack.class);
+            }
 
-            try {
-                taczIAmmoClass = Class.forName("com.tacz.guns.api.item.IAmmo");
-                taczIsAmmoOfGunMethod = taczIAmmoClass.getMethod("isAmmoOfGun", ItemStack.class, ItemStack.class);
-            } catch (Throwable ignored) {}
+            taczIAmmoClass = safeGetClass("com.tacz.guns.api.item.IAmmo");
+            if (taczIAmmoClass != null) {
+                taczIsAmmoOfGunMethod = safeGetMethod(taczIAmmoClass, "isAmmoOfGun", ItemStack.class, ItemStack.class);
+            }
 
-            try {
-                taczIAmmoBoxClass = Class.forName("com.tacz.guns.api.item.IAmmoBox");
-                taczIsAmmoBoxOfGunMethod = taczIAmmoBoxClass.getMethod("isAmmoBoxOfGun", ItemStack.class, ItemStack.class);
-                taczGetAmmoCountMethod = taczIAmmoBoxClass.getMethod("getAmmoCount", ItemStack.class);
-            } catch (Throwable ignored) {}
+            taczIAmmoBoxClass = safeGetClass("com.tacz.guns.api.item.IAmmoBox");
+            if (taczIAmmoBoxClass != null) {
+                taczIsAmmoBoxOfGunMethod = safeGetMethod(taczIAmmoBoxClass, "isAmmoBoxOfGun", ItemStack.class, ItemStack.class);
+                taczGetAmmoCountMethod = safeGetMethod(taczIAmmoBoxClass, "getAmmoCount", ItemStack.class);
+            }
 
-            try {
-                taczHasBulletInBarrelMethod = taczIGunClass.getMethod("hasBulletInBarrel", ItemStack.class);
-            } catch (Throwable ignored) {}
-            try {
-                taczHasInventoryAmmoMethod = taczIGunClass.getMethod("hasInventoryAmmo", LivingEntity.class, ItemStack.class, boolean.class);
-            } catch (Throwable ignored) {}
+            if (taczIGunClass != null) {
+                taczHasBulletInBarrelMethod = safeGetMethod(taczIGunClass, "hasBulletInBarrel", ItemStack.class);
+                taczHasInventoryAmmoMethod = safeGetMethod(taczIGunClass, "hasInventoryAmmo", LivingEntity.class, ItemStack.class, boolean.class);
+            }
 
-            try {
-                taczClientGunOperatorClass = Class.forName("com.tacz.guns.api.client.gameplay.IClientPlayerGunOperator");
-                taczFromLocalPlayerMethod = taczClientGunOperatorClass.getMethod("fromLocalPlayer", net.minecraft.client.player.LocalPlayer.class);
-                taczClientReloadMethod = taczClientGunOperatorClass.getMethod("reload");
-            } catch (Throwable ignored) {}
+            taczClientGunOperatorClass = safeGetClass("com.tacz.guns.api.client.gameplay.IClientPlayerGunOperator");
+            if (taczClientGunOperatorClass != null) {
+                taczFromLocalPlayerMethod = safeGetMethod(taczClientGunOperatorClass, "fromLocalPlayer", net.minecraft.client.player.LocalPlayer.class);
+                taczClientReloadMethod = safeGetMethod(taczClientGunOperatorClass, "reload");
+            }
 
-            try {
-                taczReloadKeyClass = Class.forName("com.tacz.guns.client.input.ReloadKey");
-                taczReloadKeyField = taczReloadKeyClass.getField("RELOAD_KEY");
-            } catch (Throwable ignored) {}
+            taczReloadKeyClass = safeGetClass("com.tacz.guns.client.input.ReloadKey");
+            if (taczReloadKeyClass != null) {
+                taczReloadKeyField = safeGetField(taczReloadKeyClass, "RELOAD_KEY");
+            }
 
-            try {
-                taczShootKeyClass = Class.forName("com.tacz.guns.client.input.ShootKey");
-                taczShootControllerTickMethod = taczShootKeyClass.getMethod("shootControllerTick", boolean.class);
-                taczShootKeyField = taczShootKeyClass.getField("SHOOT_KEY");
-            } catch (Throwable ignored) {}
+            taczShootKeyClass = safeGetClass("com.tacz.guns.client.input.ShootKey");
+            if (taczShootKeyClass != null) {
+                taczShootControllerTickMethod = safeGetMethod(taczShootKeyClass, "shootControllerTick", boolean.class);
+                taczShootKeyField = safeGetField(taczShootKeyClass, "SHOOT_KEY");
+            }
 
-            taczAvailable = true;
-        } catch (Throwable ignored) {
-            taczAvailable = false;
-        }
+            if (taczIGunClass != null && taczGetIGunOrNullMethod != null) {
+                taczAvailable = true;
+            }
+        });
     }
 
     private static synchronized void initPbReflection() {
         if (pbChecked) return;
         pbChecked = true;
-        try {
-            pbGunItemClass = Class.forName("com.vicmatskiv.pointblank.item.GunItem");
-            try {
-                Class<?> fireModeClass = Class.forName("com.vicmatskiv.pointblank.item.FireModeInstance");
-                pbGetAmmoMethod = pbGunItemClass.getMethod("getAmmo", ItemStack.class, fireModeClass);
-                pbGetMaxAmmoCapacityMethod = pbGunItemClass.getMethod("getMaxAmmoCapacity", ItemStack.class, fireModeClass);
-                pbFmiGetTypeMethod = fireModeClass.getMethod("getType");
-                pbFmiGetRpmMethod = fireModeClass.getMethod("getRpm");
-            } catch (Throwable ignored) {}
-            try {
-                pbGetFireModeInstanceMethod = pbGunItemClass.getMethod("getFireModeInstance", ItemStack.class);
-            } catch (Throwable ignored) {}
-            try {
-                pbTryReloadMethod = pbGunItemClass.getMethod("tryReload", Player.class, ItemStack.class);
-            } catch (Throwable ignored) {}
-            try {
-                Class<?> fmiClass = Class.forName("com.vicmatskiv.pointblank.item.FireModeInstance");
-                pbCanReloadGunMethod = pbGunItemClass.getMethod("canReloadGun", ItemStack.class, Player.class, fmiClass);
-            } catch (Throwable ignored) {}
-            try {
-                pbGetCompatibleAmmoMethod = pbGunItemClass.getMethod("getCompatibleAmmo");
-            } catch (Throwable ignored) {}
-            try {
-                pbRequestReloadMethod = pbGunItemClass.getMethod("requestReloadFromServer", Player.class, ItemStack.class);
-            } catch (Throwable ignored) {}
-            try {
-                pbGunClientStateClass = Class.forName("com.vicmatskiv.pointblank.client.GunClientState");
-                pbGetClientStateMethod = pbGunClientStateClass.getMethod("getState", Player.class, ItemStack.class, int.class, boolean.class);
-                pbStateIsReloadingMethod = pbGunClientStateClass.getMethod("isReloading");
-                pbStateIsPreparingReloadMethod = pbGunClientStateClass.getMethod("isPreparingReload");
-            } catch (Throwable ignored) {}
-            try {
-                pbResolveSlotIndexMethod = pbGunItemClass.getMethod("resolveSlotIndex", Player.class, ItemStack.class);
-            } catch (Throwable ignored) {}
-            try {
-                Class<?> eventHandler = Class.forName("com.vicmatskiv.pointblank.client.ClientEventHandler");
-                pbReloadKeyField = eventHandler.getField("RELOAD_KEY");
+        runSilently(() -> {
+            pbGunItemClass = safeGetClass("com.vicmatskiv.pointblank.item.GunItem");
+            if (pbGunItemClass != null) {
+                Class<?> fireModeClass = safeGetClass("com.vicmatskiv.pointblank.item.FireModeInstance");
+                if (fireModeClass != null) {
+                    pbGetAmmoMethod = safeGetMethod(pbGunItemClass, "getAmmo", ItemStack.class, fireModeClass);
+                    pbGetMaxAmmoCapacityMethod = safeGetMethod(pbGunItemClass, "getMaxAmmoCapacity", ItemStack.class, fireModeClass);
+                    pbFmiGetTypeMethod = safeGetMethod(fireModeClass, "getType");
+                    pbFmiGetRpmMethod = safeGetMethod(fireModeClass, "getRpm");
+                    pbCanReloadGunMethod = safeGetMethod(pbGunItemClass, "canReloadGun", ItemStack.class, Player.class, fireModeClass);
+                }
+                pbGetFireModeInstanceMethod = safeGetMethod(pbGunItemClass, "getFireModeInstance", ItemStack.class);
+                pbTryReloadMethod = safeGetMethod(pbGunItemClass, "tryReload", Player.class, ItemStack.class);
+                pbGetCompatibleAmmoMethod = safeGetMethod(pbGunItemClass, "getCompatibleAmmo");
+                pbRequestReloadMethod = safeGetMethod(pbGunItemClass, "requestReloadFromServer", Player.class, ItemStack.class);
+                pbResolveSlotIndexMethod = safeGetMethod(pbGunItemClass, "resolveSlotIndex", Player.class, ItemStack.class);
+            }
+
+            pbGunClientStateClass = safeGetClass("com.vicmatskiv.pointblank.client.GunClientState");
+            if (pbGunClientStateClass != null) {
+                pbGetClientStateMethod = safeGetMethod(pbGunClientStateClass, "getState", Player.class, ItemStack.class, int.class, boolean.class);
+                pbStateIsReloadingMethod = safeGetMethod(pbGunClientStateClass, "isReloading");
+                pbStateIsPreparingReloadMethod = safeGetMethod(pbGunClientStateClass, "isPreparingReload");
+            }
+
+            Class<?> eventHandler = safeGetClass("com.vicmatskiv.pointblank.client.ClientEventHandler");
+            if (eventHandler != null) {
+                pbReloadKeyField = safeGetField(eventHandler, "RELOAD_KEY");
                 if (pbReloadKeyField != null) {
                     Class<?> type = pbReloadKeyField.getType();
-                    try {
-                        pbLazyGetMethod = type.getMethod("get");
-                    } catch (Throwable ignored) {}
+                    pbLazyGetMethod = safeGetMethod(type, "get");
                 }
-            } catch (Throwable ignored) {}
-            pbAvailable = true;
-        } catch (Throwable ignored) {
-            pbAvailable = false;
-        }
+            }
+
+            if (pbGunItemClass != null) {
+                pbAvailable = true;
+            }
+        });
     }
 
     private static synchronized void initJegReflection() {
         if (jegChecked) return;
         jegChecked = true;
-        try {
-            jegGunItemClass = Class.forName("ttv.migami.jeg.item.GunItem");
-            jegGunClass = Class.forName("ttv.migami.jeg.common.Gun");
-            try {
-                jegGetModifiedGunMethod = jegGunItemClass.getMethod("getModifiedGun", ItemStack.class);
-                jegFindAmmoStackMethod = jegGunClass.getMethod("findAmmoStack", Player.class, ResourceLocation.class);
-                jegGetProjectileMethod = jegGunClass.getMethod("getProjectile");
-                jegGetGeneralMethod = jegGunClass.getMethod("getGeneral");
+        runSilently(() -> {
+            jegGunItemClass = safeGetClass("ttv.migami.jeg.item.GunItem");
+            jegGunClass = safeGetClass("ttv.migami.jeg.common.Gun");
 
-                Class<?> projClass = Class.forName("ttv.migami.jeg.common.Gun$Projectile");
-                jegProjGetItemMethod = projClass.getMethod("getItem");
+            if (jegGunItemClass != null) {
+                jegGetModifiedGunMethod = safeGetMethod(jegGunItemClass, "getModifiedGun", ItemStack.class);
+            }
+            if (jegGunClass != null) {
+                jegFindAmmoStackMethod = safeGetMethod(jegGunClass, "findAmmoStack", Player.class, ResourceLocation.class);
+                jegGetProjectileMethod = safeGetMethod(jegGunClass, "getProjectile");
+                jegGetGeneralMethod = safeGetMethod(jegGunClass, "getGeneral");
+                jegGetReloadsMethod = safeGetMethod(jegGunClass, "getReloads");
 
-                Class<?> genClass = Class.forName("ttv.migami.jeg.common.Gun$General");
-                jegGenGetFireModeMethod = genClass.getMethod("getFireMode");
-                jegGenGetRateMethod = genClass.getMethod("getRate");
-                try {
-                    Class<?> fmClass = Class.forName("ttv.migami.jeg.common.Gun$FireMode");
-                    jegFireModeGetIdMethod = fmClass.getMethod("getId");
-                } catch (Throwable ignored) {}
-                try {
-                    jegGenGetMaxHoldFireMethod = genClass.getMethod("getMaxHoldFire");
-                } catch (Throwable ignored) {}
+                Class<?> projClass = safeGetClass("ttv.migami.jeg.common.Gun$Projectile");
+                if (projClass != null) {
+                    jegProjGetItemMethod = safeGetMethod(projClass, "getItem");
+                    jegProjGetSpeedMethod = safeGetMethod(projClass, "getSpeed");
+                    jegProjIsGravityMethod = safeGetMethod(projClass, "isGravity");
+                    jegProjGetHeadshotMultiplierMethod = safeGetMethod(projClass, "getHeadshotMultiplier");
+                }
 
-                try {
-                    jegGetReloadsMethod = jegGunClass.getMethod("getReloads");
-                    Class<?> reloadsClass = Class.forName("ttv.migami.jeg.common.Gun$Reloads");
-                    jegReloadsGetMaxAmmoMethod = reloadsClass.getMethod("getMaxAmmo");
-                    try {
-                        jegReloadsGetReloadItemMethod = reloadsClass.getMethod("getReloadItem");
-                    } catch (Throwable ignored) {}
-                } catch (Throwable ignored) {}
+                Class<?> genClass = safeGetClass("ttv.migami.jeg.common.Gun$General");
+                if (genClass != null) {
+                    jegGenGetFireModeMethod = safeGetMethod(genClass, "getFireMode");
+                    jegGenGetRateMethod = safeGetMethod(genClass, "getRate");
+                    jegGenGetMaxHoldFireMethod = safeGetMethod(genClass, "getMaxHoldFire");
+                }
 
-                try {
-                    jegProjGetSpeedMethod = projClass.getMethod("getSpeed");
-                    jegProjIsGravityMethod = projClass.getMethod("isGravity");
-                    jegProjGetHeadshotMultiplierMethod = projClass.getMethod("getHeadshotMultiplier");
-                } catch (Throwable ignored) {}
-            } catch (Throwable ignored) {}
-            try {
-                jegChargeTrackerClass = Class.forName("ttv.migami.jeg.common.ChargeTracker");
-                jegGetChargeProgressMethod = jegChargeTrackerClass.getMethod("getChargeProgress", Player.class, ItemStack.class);
-            } catch (Throwable ignored) {}
-            try {
-                Class<?> kbClass = Class.forName("ttv.migami.jeg.client.KeyBinds");
-                jegKeyReloadField = kbClass.getField("KEY_RELOAD");
-                try {
-                    jegGetShootMappingMethod = kbClass.getMethod("getShootMapping");
-                    jegGetAimMappingMethod = kbClass.getMethod("getAimMapping");
-                } catch (Throwable ignored) {}
-            } catch (Throwable ignored) {}
-            try {
-                jegReloadHandlerClass = Class.forName("ttv.migami.jeg.client.handler.ReloadHandler");
-                jegGetReloadHandlerMethod = jegReloadHandlerClass.getMethod("get");
-                jegSetReloadingMethod = jegReloadHandlerClass.getMethod("setReloading", boolean.class);
-                jegGetReloadTimerMethod = jegReloadHandlerClass.getMethod("getReloadTimer");
-            } catch (Throwable ignored) {}
-            try {
-                jegShootingHandlerClass = Class.forName("ttv.migami.jeg.client.handler.ShootingHandler");
-                jegGetShootingHandlerMethod = jegShootingHandlerClass.getMethod("get");
-                jegGetHoldFireMethod = jegShootingHandlerClass.getMethod("getHoldFire");
-            } catch (Throwable ignored) {}
-            try {
-                jegAimingHandlerClass = Class.forName("ttv.migami.jeg.client.handler.AimingHandler");
-                jegGetAimingHandlerMethod = jegAimingHandlerClass.getMethod("get");
-                jegIsAimingMethod = jegAimingHandlerClass.getMethod("isAiming");
-            } catch (Throwable ignored) {}
-            jegAvailable = true;
-        } catch (Throwable ignored) {
-            jegAvailable = false;
-        }
+                Class<?> fmClass = safeGetClass("ttv.migami.jeg.common.Gun$FireMode");
+                if (fmClass != null) {
+                    jegFireModeGetIdMethod = safeGetMethod(fmClass, "getId");
+                }
+
+                Class<?> reloadsClass = safeGetClass("ttv.migami.jeg.common.Gun$Reloads");
+                if (reloadsClass != null) {
+                    jegReloadsGetMaxAmmoMethod = safeGetMethod(reloadsClass, "getMaxAmmo");
+                    jegReloadsGetReloadItemMethod = safeGetMethod(reloadsClass, "getReloadItem");
+                }
+            }
+
+            jegChargeTrackerClass = safeGetClass("ttv.migami.jeg.common.ChargeTracker");
+            if (jegChargeTrackerClass != null) {
+                jegGetChargeProgressMethod = safeGetMethod(jegChargeTrackerClass, "getChargeProgress", Player.class, ItemStack.class);
+            }
+
+            Class<?> kbClass = safeGetClass("ttv.migami.jeg.client.KeyBinds");
+            if (kbClass != null) {
+                jegKeyReloadField = safeGetField(kbClass, "KEY_RELOAD");
+                jegGetShootMappingMethod = safeGetMethod(kbClass, "getShootMapping");
+                jegGetAimMappingMethod = safeGetMethod(kbClass, "getAimMapping");
+            }
+
+            jegReloadHandlerClass = safeGetClass("ttv.migami.jeg.client.handler.ReloadHandler");
+            if (jegReloadHandlerClass != null) {
+                jegGetReloadHandlerMethod = safeGetMethod(jegReloadHandlerClass, "get");
+                jegSetReloadingMethod = safeGetMethod(jegReloadHandlerClass, "setReloading", boolean.class);
+                jegGetReloadTimerMethod = safeGetMethod(jegReloadHandlerClass, "getReloadTimer");
+            }
+
+            jegShootingHandlerClass = safeGetClass("ttv.migami.jeg.client.handler.ShootingHandler");
+            if (jegShootingHandlerClass != null) {
+                jegGetShootingHandlerMethod = safeGetMethod(jegShootingHandlerClass, "get");
+                jegGetHoldFireMethod = safeGetMethod(jegShootingHandlerClass, "getHoldFire");
+            }
+
+            jegAimingHandlerClass = safeGetClass("ttv.migami.jeg.client.handler.AimingHandler");
+            if (jegAimingHandlerClass != null) {
+                jegGetAimingHandlerMethod = safeGetMethod(jegAimingHandlerClass, "get");
+                jegIsAimingMethod = safeGetMethod(jegAimingHandlerClass, "isAiming");
+            }
+
+            if (jegGunItemClass != null || jegGunClass != null) {
+                jegAvailable = true;
+            }
+        });
     }
 
     private static synchronized void initScgunsReflection() {
         if (scgunsChecked) return;
         scgunsChecked = true;
-        try {
-            scgunsGunItemClass = Class.forName("top.ribs.scguns.item.GunItem");
-            scgunsGunClass = Class.forName("top.ribs.scguns.common.Gun");
-            try {
-                scgunsGetModifiedGunMethod = scgunsGunItemClass.getMethod("getModifiedGun", ItemStack.class);
-                scgunsFindAmmoStackMethod = scgunsGunClass.getMethod("findAmmoStack", Player.class, Item.class);
-                scgunsGetCurrentAmmoItemMethod = scgunsGunClass.getMethod("getCurrentAmmoItem", ItemStack.class);
-                scgunsGetMaxAmmoMethod = scgunsGunClass.getMethod("getMaxAmmo", ItemStack.class);
-                scgunsGetAmmoCountMethod = scgunsGunClass.getMethod("getAmmoCount", ItemStack.class);
-                scgunsGetGeneralMethod = scgunsGunClass.getMethod("getGeneral");
-                scgunsGetReloadsMethod = scgunsGunClass.getMethod("getReloads");
+        runSilently(() -> {
+            scgunsGunItemClass = safeGetClass("top.ribs.scguns.item.GunItem");
+            scgunsGunClass = safeGetClass("top.ribs.scguns.common.Gun");
 
-                Class<?> genClass = Class.forName("top.ribs.scguns.common.Gun$General");
-                scgunsGenIsAutoMethod = genClass.getMethod("isAuto");
-                scgunsGenIsRevolverMethod = genClass.getMethod("isRevolver");
-                scgunsGenGetRateMethod = genClass.getMethod("getRate");
+            if (scgunsGunItemClass != null) {
+                scgunsGetModifiedGunMethod = safeGetMethod(scgunsGunItemClass, "getModifiedGun", ItemStack.class);
+            }
+            if (scgunsGunClass != null) {
+                scgunsFindAmmoStackMethod = safeGetMethod(scgunsGunClass, "findAmmoStack", Player.class, Item.class);
+                scgunsGetCurrentAmmoItemMethod = safeGetMethod(scgunsGunClass, "getCurrentAmmoItem", ItemStack.class);
+                scgunsGetMaxAmmoMethod = safeGetMethod(scgunsGunClass, "getMaxAmmo", ItemStack.class);
+                scgunsGetAmmoCountMethod = safeGetMethod(scgunsGunClass, "getAmmoCount", ItemStack.class);
+                scgunsGetGeneralMethod = safeGetMethod(scgunsGunClass, "getGeneral");
+                scgunsGetReloadsMethod = safeGetMethod(scgunsGunClass, "getReloads");
 
-                Class<?> reloadsClass = Class.forName("top.ribs.scguns.common.Gun$Reloads");
-                scgunsReloadsGetReloadTypeMethod = reloadsClass.getMethod("getReloadType");
+                Class<?> genClass = safeGetClass("top.ribs.scguns.common.Gun$General");
+                if (genClass != null) {
+                    scgunsGenIsAutoMethod = safeGetMethod(genClass, "isAuto");
+                    scgunsGenIsRevolverMethod = safeGetMethod(genClass, "isRevolver");
+                    scgunsGenGetRateMethod = safeGetMethod(genClass, "getRate");
+                }
 
-                Class<?> reloadTypeClass = Class.forName("top.ribs.scguns.common.ReloadType");
-                Field manualField = reloadTypeClass.getField("MANUAL");
-                scgunsReloadTypeManualObj = manualField.get(null);
-            } catch (Throwable ignored) {}
-            try {
-                Class<?> kbClass = Class.forName("top.ribs.scguns.client.KeyBinds");
-                scgunsKeyReloadField = kbClass.getField("KEY_RELOAD");
-            } catch (Throwable ignored) {}
-            try {
-                scgunsReloadHandlerClass = Class.forName("top.ribs.scguns.client.handler.ReloadHandler");
-                scgunsGetReloadHandlerMethod = scgunsReloadHandlerClass.getMethod("get");
-                scgunsSetReloadingMethod = scgunsReloadHandlerClass.getMethod("setReloading", boolean.class);
-                scgunsGetReloadTimerMethod = scgunsReloadHandlerClass.getMethod("getReloadTimer");
-            } catch (Throwable ignored) {}
-            try {
-                scgunsAimingHandlerClass = Class.forName("top.ribs.scguns.client.handler.AimingHandler");
-                scgunsGetAimingHandlerMethod = scgunsAimingHandlerClass.getMethod("get");
-                scgunsIsAimingMethod = scgunsAimingHandlerClass.getMethod("isAiming");
-            } catch (Throwable ignored) {}
-            scgunsAvailable = true;
-        } catch (Throwable ignored) {
-            scgunsAvailable = false;
-        }
+                Class<?> reloadsClass = safeGetClass("top.ribs.scguns.common.Gun$Reloads");
+                if (reloadsClass != null) {
+                    scgunsReloadsGetReloadTypeMethod = safeGetMethod(reloadsClass, "getReloadType");
+                }
+
+                Class<?> reloadTypeClass = safeGetClass("top.ribs.scguns.common.ReloadType");
+                if (reloadTypeClass != null) {
+                    Field manualField = safeGetField(reloadTypeClass, "MANUAL");
+                    scgunsReloadTypeManualObj = safeGetFieldValue(manualField, null);
+                }
+            }
+
+            Class<?> kbClass = safeGetClass("top.ribs.scguns.client.KeyBinds");
+            if (kbClass != null) {
+                scgunsKeyReloadField = safeGetField(kbClass, "KEY_RELOAD");
+            }
+
+            scgunsReloadHandlerClass = safeGetClass("top.ribs.scguns.client.handler.ReloadHandler");
+            if (scgunsReloadHandlerClass != null) {
+                scgunsGetReloadHandlerMethod = safeGetMethod(scgunsReloadHandlerClass, "get");
+                scgunsSetReloadingMethod = safeGetMethod(scgunsReloadHandlerClass, "setReloading", boolean.class);
+                scgunsGetReloadTimerMethod = safeGetMethod(scgunsReloadHandlerClass, "getReloadTimer");
+            }
+
+            scgunsAimingHandlerClass = safeGetClass("top.ribs.scguns.client.handler.AimingHandler");
+            if (scgunsAimingHandlerClass != null) {
+                scgunsGetAimingHandlerMethod = safeGetMethod(scgunsAimingHandlerClass, "get");
+                scgunsIsAimingMethod = safeGetMethod(scgunsAimingHandlerClass, "isAiming");
+            }
+
+            if (scgunsGunItemClass != null || scgunsGunClass != null) {
+                scgunsAvailable = true;
+            }
+        });
     }
 
     private static synchronized void initCgmReflection() {
         if (cgmChecked) return;
         cgmChecked = true;
+        runSilently(() -> {
+            cgmGunItemClass = safeGetClass("com.mrcrayfish.guns.item.GunItem");
+
+            cgmReloadHandlerClass = safeGetClass("com.mrcrayfish.guns.client.handler.ReloadHandler");
+            if (cgmReloadHandlerClass != null) {
+                cgmGetReloadHandlerMethod = safeGetMethod(cgmReloadHandlerClass, "get");
+                cgmSetReloadingMethod = safeGetMethod(cgmReloadHandlerClass, "setReloading", boolean.class);
+                cgmGetReloadTimerMethod = safeGetMethod(cgmReloadHandlerClass, "getReloadTimer");
+            }
+
+            cgmAimingHandlerClass = safeGetClass("com.mrcrayfish.guns.client.handler.AimingHandler");
+            if (cgmAimingHandlerClass != null) {
+                cgmGetAimingHandlerMethod = safeGetMethod(cgmAimingHandlerClass, "get");
+                cgmIsAimingMethod = safeGetMethod(cgmAimingHandlerClass, "isAiming");
+            }
+
+            if (cgmGunItemClass != null) {
+                cgmAvailable = true;
+            }
+        });
+    }
+
+    // ==========================================
+    // 反射安全调用工具方法 (Reflection Helpers)
+    // ==========================================
+
+    @FunctionalInterface
+    public interface ReflectionSupplier<T> {
+        T get() throws Throwable;
+    }
+
+    @FunctionalInterface
+    public interface ReflectionAction {
+        void run() throws Throwable;
+    }
+
+    public static <T> T invokeSilently(ReflectionSupplier<T> supplier, T defaultValue) {
         try {
-            cgmGunItemClass = Class.forName("com.mrcrayfish.guns.item.GunItem");
-            try {
-                cgmReloadHandlerClass = Class.forName("com.mrcrayfish.guns.client.handler.ReloadHandler");
-                cgmGetReloadHandlerMethod = cgmReloadHandlerClass.getMethod("get");
-                cgmSetReloadingMethod = cgmReloadHandlerClass.getMethod("setReloading", boolean.class);
-                cgmGetReloadTimerMethod = cgmReloadHandlerClass.getMethod("getReloadTimer");
-            } catch (Throwable ignored) {}
-            try {
-                cgmAimingHandlerClass = Class.forName("com.mrcrayfish.guns.client.handler.AimingHandler");
-                cgmGetAimingHandlerMethod = cgmAimingHandlerClass.getMethod("get");
-                cgmIsAimingMethod = cgmAimingHandlerClass.getMethod("isAiming");
-            } catch (Throwable ignored) {}
-            cgmAvailable = true;
-        } catch (Throwable ignored) {
-            cgmAvailable = false;
+            return supplier.get();
+        } catch (Throwable t) {
+            LOGGER.trace("Reflection call failed: {}", t.getMessage());
+            return defaultValue;
+        }
+    }
+
+    public static void runSilently(ReflectionAction action) {
+        try {
+            action.run();
+        } catch (Throwable t) {
+            LOGGER.trace("Reflection action failed: {}", t.getMessage());
+        }
+    }
+
+    public static Class<?> safeGetClass(String className) {
+        try {
+            return Class.forName(className);
+        } catch (Throwable t) {
+            LOGGER.trace("Failed to load class {}: {}", className, t.getMessage());
+            return null;
+        }
+    }
+
+    public static Method safeGetMethod(Class<?> clazz, String methodName, Class<?>... parameterTypes) {
+        if (clazz == null) return null;
+        try {
+            return clazz.getMethod(methodName, parameterTypes);
+        } catch (Throwable t) {
+            LOGGER.trace("Failed to get method {} on {}: {}", methodName, clazz.getName(), t.getMessage());
+            return null;
+        }
+    }
+
+    public static Field safeGetField(Class<?> clazz, String fieldName) {
+        if (clazz == null) return null;
+        try {
+            return clazz.getField(fieldName);
+        } catch (Throwable t) {
+            LOGGER.trace("Failed to get field {} on {}: {}", fieldName, clazz.getName(), t.getMessage());
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T safeInvoke(Method method, Object target, Object... args) {
+        if (method == null) return null;
+        try {
+            return (T) method.invoke(target, args);
+        } catch (Throwable t) {
+            LOGGER.trace("Method invocation failed for {}: {}", method.getName(), t.getMessage());
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T safeInvokeOrDefault(Method method, Object target, T defaultValue, Object... args) {
+        if (method == null) return defaultValue;
+        try {
+            Object result = method.invoke(target, args);
+            return result != null ? (T) result : defaultValue;
+        } catch (Throwable t) {
+            LOGGER.trace("Method invocation failed for {}: {}", method.getName(), t.getMessage());
+            return defaultValue;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T safeGetFieldValue(Field field, Object target) {
+        if (field == null) return null;
+        try {
+            return (T) field.get(target);
+        } catch (Throwable t) {
+            LOGGER.trace("Field access failed for {}: {}", field.getName(), t.getMessage());
+            return null;
         }
     }
 }
