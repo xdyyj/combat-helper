@@ -176,6 +176,16 @@ public final class AutoBallisticsTracker {
     }
 
     /**
+     * 清理手持物品与 NBT 标签的瞬态引用 (在世界卸载或退出游戏时调用，防止跨世界内存泄漏)
+     */
+    public static void clearTransientReferences() {
+        lastHeldStackRef = ItemStack.EMPTY;
+        lastHeldTagRef = null;
+        lastCachedSignature = null;
+        lastCachedProfile = null;
+    }
+
+    /**
      * 获取指定弓的综合弹道参数 (第 0 tick 零延迟精准获取)
      */
     public static BallisticsProfile getProfile(ItemStack bowStack) {
@@ -869,6 +879,7 @@ public final class AutoBallisticsTracker {
         }
 
         if (sourcePath != null) {
+            boolean loadedSuccess = false;
             try (Reader reader = Files.newBufferedReader(sourcePath)) {
                 Map<String, BallisticsProfile> loaded = GSON.fromJson(reader, new TypeToken<Map<String, BallisticsProfile>>() {}.getType());
                 if (loaded != null && !loaded.isEmpty()) {
@@ -885,9 +896,34 @@ public final class AutoBallisticsTracker {
                     // 自动净化历史迁移碎片数据
                     CACHE.keySet().removeIf(k -> k.contains("modern_kinetic_gun#"));
                     LOGGER.info("成功载入 " + loaded.size() + " 个本地武器弹道档案。当前档案库共计 " + CACHE.size() + " 种武器。");
+                    loadedSuccess = true;
                 }
             } catch (Exception e) {
-                LOGGER.error("读取武器弹道档案失败: " + sourcePath, e);
+                LOGGER.error("读取武器弹道档案失败: " + sourcePath + "，正在尝试从 .bak 备份恢复...", e);
+            }
+
+            if (!loadedSuccess) {
+                Path backupPath = sourcePath.resolveSibling(sourcePath.getFileName().toString() + ".bak");
+                if (Files.exists(backupPath)) {
+                    try (Reader backupReader = Files.newBufferedReader(backupPath)) {
+                        Map<String, BallisticsProfile> loaded = GSON.fromJson(backupReader, new TypeToken<Map<String, BallisticsProfile>>() {}.getType());
+                        if (loaded != null && !loaded.isEmpty()) {
+                            long now = System.currentTimeMillis();
+                            long idx = 0;
+                            for (BallisticsProfile p : loaded.values()) {
+                                if (p.lastUpdated <= 0) {
+                                    p.lastUpdated = now - (loaded.size() - idx) * 1000L;
+                                }
+                                idx++;
+                            }
+                            CACHE.putAll(loaded);
+                            CACHE.keySet().removeIf(k -> k.contains("modern_kinetic_gun#"));
+                            LOGGER.info("成功从 .bak 备份文件载入 " + loaded.size() + " 个本地武器弹道档案。");
+                        }
+                    } catch (Exception ex) {
+                        LOGGER.error("从 .bak 备份文件读取武器弹道档案亦失败: " + backupPath, ex);
+                    }
+                }
             }
         }
 
@@ -989,6 +1025,7 @@ public final class AutoBallisticsTracker {
     private static synchronized void saveToDisk() {
         if (!isDirty) return;
         Path path = getConfigFile();
+        Path tempFile = path.resolveSibling(path.getFileName().toString() + ".tmp");
         try {
             // 防写空安全保护：若 CACHE 为空，但目标文件存在且包含内容，坚决拒绝覆盖并警告
             if (CACHE.isEmpty()) {
@@ -1012,7 +1049,6 @@ public final class AutoBallisticsTracker {
             }
 
             // 采用临时文件 + 原子替换，防止断电或意外中断导致文件损坏
-            Path tempFile = path.resolveSibling(path.getFileName().toString() + ".tmp");
             try (Writer writer = Files.newBufferedWriter(tempFile)) {
                 GSON.toJson(CACHE, writer);
             }
@@ -1025,6 +1061,12 @@ public final class AutoBallisticsTracker {
             isDirty = false;
         } catch (Exception e) {
             LOGGER.error("保存武器弹道档案失败: " + path, e);
+        } finally {
+            if (Files.exists(tempFile)) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (Throwable ignored) {}
+            }
         }
     }
 }

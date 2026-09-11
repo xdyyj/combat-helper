@@ -640,21 +640,27 @@ public class TacticalConsoleScreen extends Screen {
                                     "§8(点击切换方向)")
                     ));
 
-                    // 2. 排序列表条目
+                    // 2. 排序列表条目 (名称预映射计算，避免 O(N log N) 比较时重复创建 ItemStack)
                     List<Map.Entry<String, AutoBallisticsTracker.BallisticsProfile>> entryList = new ArrayList<>(cacheEntries.entrySet());
-                    entryList.sort((e1, e2) -> {
-                        if (archiveSortByTime) {
+                    if (archiveSortByTime) {
+                        entryList.sort((e1, e2) -> {
                             long t1 = e1.getValue().lastUpdated;
                             long t2 = e2.getValue().lastUpdated;
                             int cmp = Long.compare(t1, t2);
                             return archiveSortAscending ? cmp : -cmp; // 倒序 = 较大时间戳在前
-                        } else {
-                            String n1 = getReadableWeaponName(e1.getKey());
-                            String n2 = getReadableWeaponName(e2.getKey());
+                        });
+                    } else {
+                        Map<String, String> nameCache = new HashMap<>(entryList.size());
+                        for (Map.Entry<String, AutoBallisticsTracker.BallisticsProfile> e : entryList) {
+                            nameCache.put(e.getKey(), getReadableWeaponName(e.getKey()));
+                        }
+                        entryList.sort((e1, e2) -> {
+                            String n1 = nameCache.getOrDefault(e1.getKey(), "");
+                            String n2 = nameCache.getOrDefault(e2.getKey(), "");
                             int cmp = n1.compareToIgnoreCase(n2);
                             return archiveSortAscending ? cmp : -cmp;
-                        }
-                    });
+                        });
+                    }
 
                     int maxPages = Math.max(1, (int) Math.ceil((double) entryList.size() / ARCHIVE_PAGE_SIZE));
                     if (archivePage >= maxPages) archivePage = maxPages - 1;
@@ -822,19 +828,25 @@ public class TacticalConsoleScreen extends Screen {
                     originIndices.put(entries.get(i), i);
                 }
 
-                entries.sort((id1, id2) -> {
-                    if (listSortByTime) {
+                if (listSortByTime) {
+                    entries.sort((id1, id2) -> {
                         int idx1 = originIndices.getOrDefault(id1, 0);
                         int idx2 = originIndices.getOrDefault(id2, 0);
                         int cmp = Integer.compare(idx1, idx2);
                         return listSortAscending ? cmp : -cmp; // 倒序 = 较大索引(最新)在前
-                    } else {
-                        String n1 = getReadableEntryName(id1, isEntity);
-                        String n2 = getReadableEntryName(id2, isEntity);
+                    });
+                } else {
+                    Map<String, String> nameCache = new HashMap<>(entries.size());
+                    for (String rawId : entries) {
+                        nameCache.put(rawId, getReadableEntryName(rawId, isEntity));
+                    }
+                    entries.sort((id1, id2) -> {
+                        String n1 = nameCache.getOrDefault(id1, "");
+                        String n2 = nameCache.getOrDefault(id2, "");
                         int cmp = n1.compareToIgnoreCase(n2);
                         return listSortAscending ? cmp : -cmp;
-                    }
-                });
+                    });
+                }
 
                 for (String rawId : entries) {
                     currentItems.add(new ListEntryCard(rawId, isEntity, () -> {
