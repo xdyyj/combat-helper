@@ -144,6 +144,57 @@ public final class AutoBallisticsTracker {
     private static String lastCachedSignature = null;
     private static BallisticsProfile lastCachedProfile = null;
 
+    private static volatile List<Attribute> cachedDrawSpeedAttributes = null;
+    private static volatile List<Attribute> cachedArrowVelocityAttributes = null;
+
+    private static List<Attribute> getDrawSpeedAttributes() {
+        List<Attribute> list = cachedDrawSpeedAttributes;
+        if (list == null) {
+            synchronized (AutoBallisticsTracker.class) {
+                list = cachedDrawSpeedAttributes;
+                if (list == null) {
+                    List<Attribute> found = new ArrayList<>();
+                    for (Attribute attr : ForgeRegistries.ATTRIBUTES) {
+                        ResourceLocation key = ForgeRegistries.ATTRIBUTES.getKey(attr);
+                        if (key != null) {
+                            String path = key.getPath();
+                            if (path.equals("draw_speed") || path.contains("draw_speed")) {
+                                found.add(attr);
+                            }
+                        }
+                    }
+                    list = Collections.unmodifiableList(found);
+                    cachedDrawSpeedAttributes = list;
+                }
+            }
+        }
+        return list;
+    }
+
+    private static List<Attribute> getArrowVelocityAttributes() {
+        List<Attribute> list = cachedArrowVelocityAttributes;
+        if (list == null) {
+            synchronized (AutoBallisticsTracker.class) {
+                list = cachedArrowVelocityAttributes;
+                if (list == null) {
+                    List<Attribute> found = new ArrayList<>();
+                    for (Attribute attr : ForgeRegistries.ATTRIBUTES) {
+                        ResourceLocation key = ForgeRegistries.ATTRIBUTES.getKey(attr);
+                        if (key != null) {
+                            String path = key.getPath();
+                            if (path.equals("arrow_velocity") || path.contains("arrow_velocity")) {
+                                found.add(attr);
+                            }
+                        }
+                    }
+                    list = Collections.unmodifiableList(found);
+                    cachedArrowVelocityAttributes = list;
+                }
+            }
+        }
+        return list;
+    }
+
     private static final class TrackedProjectile {
         final int entityId;
         final String cacheKey;
@@ -185,6 +236,8 @@ public final class AutoBallisticsTracker {
         lastHeldTagRef = null;
         lastCachedSignature = null;
         lastCachedProfile = null;
+        cachedDrawSpeedAttributes = null;
+        cachedArrowVelocityAttributes = null;
     }
 
     /**
@@ -367,17 +420,12 @@ public final class AutoBallisticsTracker {
 
         // 1. 优先从玩家实体的属性系统中读取最终加成 (神话在手持武器时会自动结算)
         if (player != null) {
-            for (Attribute attr : ForgeRegistries.ATTRIBUTES) {
-                ResourceLocation key = ForgeRegistries.ATTRIBUTES.getKey(attr);
-                if (key != null) {
-                    String path = key.getPath();
-                    if (path.equals("draw_speed") || path.contains("draw_speed")) {
-                        try {
-                            double val = player.getAttributeValue(attr);
-                            if (val > 0.05) {
-                                return (float) val;
-                            }
-                        } catch (Exception ignored) {}
+            for (Attribute attr : getDrawSpeedAttributes()) {
+                net.minecraft.world.entity.ai.attributes.AttributeInstance inst = player.getAttribute(attr);
+                if (inst != null) {
+                    double val = inst.getValue();
+                    if (val > 0.05) {
+                        return (float) val;
                     }
                 }
             }
@@ -519,17 +567,12 @@ public final class AutoBallisticsTracker {
         float multiplier = 1.0f;
 
         if (player != null) {
-            for (Attribute attr : ForgeRegistries.ATTRIBUTES) {
-                ResourceLocation key = ForgeRegistries.ATTRIBUTES.getKey(attr);
-                if (key != null) {
-                    String path = key.getPath();
-                    if (path.equals("arrow_velocity") || path.contains("arrow_velocity")) {
-                        try {
-                            double val = player.getAttributeValue(attr);
-                            if (val > 0.1) {
-                                return (float) val;
-                            }
-                        } catch (Exception ignored) {}
+            for (Attribute attr : getArrowVelocityAttributes()) {
+                net.minecraft.world.entity.ai.attributes.AttributeInstance inst = player.getAttribute(attr);
+                if (inst != null) {
+                    double val = inst.getValue();
+                    if (val > 0.1) {
+                        return (float) val;
                     }
                 }
             }
@@ -1000,6 +1043,8 @@ public final class AutoBallisticsTracker {
     public static void clearAllCache() {
         ensureLoaded();
         CACHE.clear();
+        cachedDrawSpeedAttributes = null;
+        cachedArrowVelocityAttributes = null;
         // 恢复 16 种经典武器权威原厂预设
         for (Map.Entry<String, BallisticsProfile> entry : DEFAULT_FACTORY_PRESETS.entrySet()) {
             CACHE.put(entry.getKey(), cloneProfile(entry.getValue()));
