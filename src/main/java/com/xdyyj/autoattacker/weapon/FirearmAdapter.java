@@ -1997,6 +1997,7 @@ public final class FirearmAdapter {
     }
 
     private static synchronized void initJegReflection() {
+        com.xdyyj.autoattacker.compat.ShoulderSurfingCompat.neutralizeLegacyShoulderSurfingIntegrations();
         if (jegChecked) return;
         jegChecked = true;
         runSilently(() -> {
@@ -2077,6 +2078,7 @@ public final class FirearmAdapter {
     }
 
     private static synchronized void initScgunsReflection() {
+        com.xdyyj.autoattacker.compat.ShoulderSurfingCompat.neutralizeLegacyShoulderSurfingIntegrations();
         if (scgunsChecked) return;
         scgunsChecked = true;
         runSilently(() -> {

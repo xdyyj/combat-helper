@@ -82,6 +82,24 @@ public final class ShoulderSurfingCompat {
         } catch (Throwable t) {
             isLoaded = false;
         }
+        neutralizeLegacyShoulderSurfingIntegrations();
+    }
+
+    /**
+     * 中和旧版枪械模组 (JEG / Scorched Guns 等) 中已废弃的 ShoulderSurfing 4.x 反射调用，
+     * 避免其在 1.20.1 + ShoulderSurfing 5.x 环境下触发 NoClassDefFoundError 导致游戏崩溃闪退。
+     */
+    public static void neutralizeLegacyShoulderSurfingIntegrations() {
+        try {
+            Class<?> jegClass = Class.forName("ttv.migami.jeg.JustEnoughGuns");
+            java.lang.reflect.Field field = jegClass.getField("shoulderSurfingLoaded");
+            field.setBoolean(null, false);
+        } catch (Throwable ignored) {}
+        try {
+            Class<?> scgClass = Class.forName("top.ribs.scguns.ScorchedGuns");
+            java.lang.reflect.Field field = scgClass.getField("shoulderSurfingLoaded");
+            field.setBoolean(null, false);
+        } catch (Throwable ignored) {}
     }
 
     /**

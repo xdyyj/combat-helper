@@ -88,6 +88,8 @@ public class ClientEvents {
     private LivingEntity lastTrackedTarget = null;
     private float lastDestYaw = Float.NaN;
     private float lastDestPitch = Float.NaN;
+    private float lastDestCamYaw = Float.NaN;
+    private float lastDestCamPitch = Float.NaN;
 
     // --- 目标运动追踪与平滑状态 ---
     private LivingEntity lastTarget = null;
@@ -105,6 +107,7 @@ public class ClientEvents {
     private static Vec3 staticSmoothedTargetVelocity = Vec3.ZERO;
     private static PredictedAim staticLastPredictedAim = null;
     private static float staticLastPredictedYaw = 0.0f;
+    private static float staticLastPredictedPitch = 0.0f;
     private static float staticLastPredictedCamYaw = 0.0f;
     private static float staticLastPredictedCamPitch = 0.0f;
 
@@ -125,6 +128,10 @@ public class ClientEvents {
 
     public static float getLastPredictedYaw() {
         return staticLastPredictedYaw;
+    }
+
+    public static float getLastPredictedPitch() {
+        return staticLastPredictedPitch;
     }
 
     public static float getLastPredictedCamYaw() {
@@ -184,12 +191,19 @@ public class ClientEvents {
         this.autoLockHoverTarget = null;
         this.autoLockHoverTicks = 0;
         this.lastTrackedTarget = null;
+        this.lastDestYaw = Float.NaN;
+        this.lastDestPitch = Float.NaN;
+        this.lastDestCamYaw = Float.NaN;
+        this.lastDestCamPitch = Float.NaN;
         this.lastAutoReloadItem = ItemStack.EMPTY;
         lastCheckedItem = ItemStack.EMPTY;
         staticCurrentTarget = null;
         staticSmoothedTargetVelocity = Vec3.ZERO;
         staticLastPredictedAim = null;
         staticLastPredictedYaw = 0.0f;
+        staticLastPredictedPitch = 0.0f;
+        staticLastPredictedCamYaw = 0.0f;
+        staticLastPredictedCamPitch = 0.0f;
         resetTargetTracking();
         AutoBallisticsTracker.clearTransientReferences();
     }
@@ -259,6 +273,7 @@ public class ClientEvents {
         }
 
         if (event.phase == TickEvent.Phase.START) {
+            ShoulderSurfingCompat.neutralizeLegacyShoulderSurfingIntegrations();
             while (ClientModEvents.DEBUG_PANEL_KEY.consumeClick()) {
                 TacticalDebugPanel.toggleControl();
             }
@@ -310,6 +325,14 @@ public class ClientEvents {
 
                                 if (mc.getConnection() != null) {
                                     mc.getConnection().send(new ServerboundMovePlayerPacket.Rot(sendYaw, sendPitch, player.onGround()));
+                                }
+                                if (ShoulderSurfingCompat.isShoulderSurfing()) {
+                                    player.setYRot(sendYaw);
+                                    player.setXRot(sendPitch);
+                                    player.yRotO = sendYaw;
+                                    player.xRotO = sendPitch;
+                                    player.yHeadRot = sendYaw;
+                                    player.yHeadRotO = sendYaw;
                                 }
                             }
 
@@ -441,6 +464,14 @@ public class ClientEvents {
                                 } else {
                                     // 阶段 2：弓弦已 100% 彻底拉满！进入瞄准就绪释放判定
                                     if (onTarget) {
+                                        if (isShoulder) {
+                                            player.setYRot(staticLastPredictedYaw);
+                                            player.setXRot(staticLastPredictedPitch);
+                                            player.yRotO = staticLastPredictedYaw;
+                                            player.xRotO = staticLastPredictedPitch;
+                                            player.yHeadRot = staticLastPredictedYaw;
+                                            player.yHeadRotO = staticLastPredictedYaw;
+                                        }
                                         // 准星锁定在目标容差内，瞬间松开左键，满威力击发出箭！
                                         lastGunShootTime = System.currentTimeMillis();
                                         com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
@@ -457,6 +488,14 @@ public class ClientEvents {
                             gunReleaseChargeTicks = 0;
                             gunReleaseCoolTicks = 0;
                             if (onTarget) {
+                                if (isShoulder) {
+                                    player.setYRot(staticLastPredictedYaw);
+                                    player.setXRot(staticLastPredictedPitch);
+                                    player.yRotO = staticLastPredictedYaw;
+                                    player.xRotO = staticLastPredictedPitch;
+                                    player.yHeadRot = staticLastPredictedYaw;
+                                    player.yHeadRotO = staticLastPredictedYaw;
+                                }
                                 lastGunShootTime = System.currentTimeMillis();
                                 if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isSemiAuto(gunStatus)) {
                                     // 半自动武器 (如 Glock, 沙漠之鹰, SPR-15 DMR, 单发步枪/狙击枪):
@@ -806,12 +845,15 @@ public class ClientEvents {
                 destYaw = directYaw + leadYawDelta * strength;
                 destPitch = directPitch + leadPitchDelta * strength;
                 staticLastPredictedYaw = destYaw;
+                staticLastPredictedPitch = destPitch;
             } else {
                 staticLastPredictedYaw = directYaw;
+                staticLastPredictedPitch = directPitch;
             }
         } else {
             staticLastPredictedAim = null;
             staticLastPredictedYaw = directYaw;
+            staticLastPredictedPitch = directPitch;
         }
 
         float destCamYaw = destYaw;
@@ -847,15 +889,14 @@ public class ClientEvents {
             staticLastPredictedCamPitch = destPitch;
         }
 
-        float targetTrackYaw = isShoulder ? destCamYaw : destYaw;
-        float targetTrackPitch = isShoulder ? destCamPitch : destPitch;
-
         // 视线丢失宽容期内不强行拉拽视角撞墙
         if (lostTargetGraceTicks > 0) {
             wasLockedLastFrame = false;
             lastTrackedTarget = null;
             lastDestYaw = Float.NaN;
             lastDestPitch = Float.NaN;
+            lastDestCamYaw = Float.NaN;
+            lastDestCamPitch = Float.NaN;
             return;
         }
 
@@ -863,48 +904,77 @@ public class ClientEvents {
         // 极速强锁 (Hard-Lock / Snap Lock): 0-Frame 绝对吸附死锁
         // ==========================================
         if (AutoAttackerConfig.AIM_LOCK_TYPE.get() == AutoAttackerConfig.AimLockType.HARD) {
-            float hardYaw = targetTrackYaw;
-            float hardPitch = Mth.clamp(targetTrackPitch, -89.5F, 89.5F);
+            float hardPlayerYaw = destYaw;
+            float hardPlayerPitch = Mth.clamp(destPitch, -89.5F, 89.5F);
+
+            float hardCamYaw = isShoulder ? destCamYaw : hardPlayerYaw;
+            float hardCamPitch = isShoulder ? Mth.clamp(destCamPitch, -89.5F, 89.5F) : hardPlayerPitch;
 
             if (isShoulder) {
-                ShoulderSurfingCompat.setCameraRotation(hardYaw, hardPitch);
+                ShoulderSurfingCompat.setCameraRotation(hardCamYaw, hardCamPitch);
             }
-            player.setYRot(hardYaw);
-            player.setXRot(hardPitch);
-            player.yRotO = hardYaw;
-            player.xRotO = hardPitch;
-            player.yHeadRot = hardYaw;
-            player.yHeadRotO = hardYaw;
+            player.setYRot(hardPlayerYaw);
+            player.setXRot(hardPlayerPitch);
+            player.yRotO = hardPlayerYaw;
+            player.xRotO = hardPlayerPitch;
+            player.yHeadRot = hardPlayerYaw;
+            player.yHeadRotO = hardPlayerYaw;
 
-            lastLockedYaw = hardYaw;
-            lastLockedPitch = hardPitch;
+            lastLockedYaw = hardCamYaw;
+            lastLockedPitch = hardCamPitch;
             wasLockedLastFrame = true;
             lastTrackedTarget = target;
-            lastDestYaw = targetTrackYaw;
-            lastDestPitch = targetTrackPitch;
+            lastDestYaw = hardPlayerYaw;
+            lastDestPitch = hardPlayerPitch;
+            lastDestCamYaw = hardCamYaw;
+            lastDestCamPitch = hardCamPitch;
             return;
         }
 
         // ==========================================
         // 动态相对运动前馈补偿 (Dynamic Rotational Kinematic Feedforward)
-        // 当角色自身移动 (例如按 D 往右走位) 时，目标相对玩家视线必然向左转动。
-        // 立即前馈补偿该角位移，驱动镜头自动向左拉拽，消除走位滞后，使准星绝对咬死在目标身上！
+        // 当角色自身移动 (例如按 A/D 往左右走位) 时，目标相对玩家视线必然发生横向转动。
+        // 分别为越肩相机 (屏幕准星) 与玩家实体 (子弹射击原点) 前馈补偿该角位移，消除走位滞后，使准星绝对咬死在目标身上，子弹绝不偏斜！
         // ==========================================
-        float kinematicYaw = 0.0f;
-        float kinematicPitch = 0.0f;
-        if (wasLockedLastFrame && lastTrackedTarget == target && !Float.isNaN(lastDestYaw) && !Float.isNaN(lastDestPitch)) {
-            kinematicYaw = Mth.wrapDegrees(targetTrackYaw - lastDestYaw);
-            kinematicPitch = targetTrackPitch - lastDestPitch;
+        float kinematicCamYaw = 0.0f;
+        float kinematicCamPitch = 0.0f;
+        float kinematicPlayerYaw = 0.0f;
+        float kinematicPlayerPitch = 0.0f;
+
+        float targetCamYaw = isShoulder ? destCamYaw : destYaw;
+        float targetCamPitch = isShoulder ? destCamPitch : destPitch;
+
+        if (wasLockedLastFrame && lastTrackedTarget == target) {
+            if (!Float.isNaN(lastDestCamYaw) && !Float.isNaN(lastDestCamPitch)) {
+                kinematicCamYaw = Mth.wrapDegrees(targetCamYaw - lastDestCamYaw);
+                kinematicCamPitch = targetCamPitch - lastDestCamPitch;
+            }
+            if (!Float.isNaN(lastDestYaw) && !Float.isNaN(lastDestPitch)) {
+                kinematicPlayerYaw = Mth.wrapDegrees(destYaw - lastDestYaw);
+                kinematicPlayerPitch = destPitch - lastDestPitch;
+            }
         }
         lastTrackedTarget = target;
-        lastDestYaw = targetTrackYaw;
-        lastDestPitch = targetTrackPitch;
+        lastDestYaw = destYaw;
+        lastDestPitch = destPitch;
+        lastDestCamYaw = targetCamYaw;
+        lastDestCamPitch = targetCamPitch;
 
-        float currentYawAfterKinematic = curYaw + kinematicYaw;
-        float currentPitchAfterKinematic = curPitch + kinematicPitch;
+        float curCamYaw = isShoulder ? ShoulderSurfingCompat.getCameraYaw() : player.getYRot();
+        float curCamPitch = isShoulder ? ShoulderSurfingCompat.getCameraPitch() : player.getXRot();
+        float currentCamYawAfterKinematic = curCamYaw + kinematicCamYaw;
+        float currentCamPitchAfterKinematic = curCamPitch + kinematicCamPitch;
 
-        float deltaY = Mth.wrapDegrees(targetTrackYaw - currentYawAfterKinematic);
-        float deltaX = Mth.wrapDegrees(targetTrackPitch - currentPitchAfterKinematic);
+        float deltaCamY = Mth.wrapDegrees(targetCamYaw - currentCamYawAfterKinematic);
+        float deltaCamX = Mth.wrapDegrees(targetCamPitch - currentCamPitchAfterKinematic);
+
+        float curPlayerYaw = player.getYRot();
+        float curPlayerPitch = player.getXRot();
+        float currentPlayerYawAfterKinematic = curPlayerYaw + kinematicPlayerYaw;
+        float currentPlayerPitchAfterKinematic = curPlayerPitch + kinematicPlayerPitch;
+
+        float deltaPlayerY = Mth.wrapDegrees(destYaw - currentPlayerYawAfterKinematic);
+        float deltaPlayerX = Mth.wrapDegrees(destPitch - currentPlayerPitchAfterKinematic);
 
         float baseFactor = AutoAttackerConfig.AIM_ASSIST_SPEED.get().floatValue();
         if (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get()) {
@@ -939,9 +1009,9 @@ public class ClientEvents {
             double userDeflection = Math.hypot(mouseDeflectionYaw, mouseDeflectionPitch);
             float userDamping = (float) Mth.clamp(1.0 - (userDeflection / 10.0), 0.2, 1.0);
 
-            // 当枪械处于射击状态且准星被后坐力抬高 (deltaX > 0，即玩家视线向上偏离目标，需要下压纠正) 时：
+            // 当枪械处于射击状态且准星被后坐力抬高 (deltaCamX > 0，即玩家视线向上偏离目标，需要下压纠正) 时：
             // 远距离 (如 68m) 角误差对准星偏移极其敏感，必须提供强劲充沛的下压刚度，绝不能被 0.48 封顶卡死！
-            if (isGunFiring && deltaX > 0) {
+            if (isGunFiring && deltaCamX > 0) {
                 float distBoost = (float) Mth.clamp(targetDistXZ / 30.0, 1.0, 2.2);
                 factorPitch = Math.min(0.92f, baseFactor + 0.38f * recoilMult * smoothedRecoilBoost * distBoost * userDamping);
             } else {
@@ -955,45 +1025,66 @@ public class ClientEvents {
         if (isGunAiming) {
             // 机瞄状态下微调抗抖：仅在水平或非后坐力回拉时平滑，下压抗后坐力期间绝不削弱下压刚度！
             factorYaw *= 0.85f;
-            if (!isGunFiring || deltaX <= 0) {
+            if (!isGunFiring || deltaCamX <= 0) {
                 factorPitch *= 0.85f;
             }
         }
 
         // 微小角距平滑阻尼 (Micro-angle Damping Buffer)，当视角与目标差角极小 (<0.03°) 时渐进衰减拉拽，彻底杜绝镜头高频震荡 (Jitter)
-        float absDeltaY = Math.abs(deltaY);
-        float absDeltaX = Math.abs(deltaX);
-        float dampedDeltaY = deltaY;
-        float dampedDeltaX = deltaX;
-        if (absDeltaY < 0.03f) {
-            dampedDeltaY *= (absDeltaY / 0.03f);
+        float absDeltaCamY = Math.abs(deltaCamY);
+        float absDeltaCamX = Math.abs(deltaCamX);
+        float dampedCamDeltaY = deltaCamY;
+        float dampedCamDeltaX = deltaCamX;
+        if (absDeltaCamY < 0.03f) {
+            dampedCamDeltaY *= (absDeltaCamY / 0.03f);
         }
-        if (absDeltaX < 0.03f) {
-            dampedDeltaX *= (absDeltaX / 0.03f);
+        if (absDeltaCamX < 0.03f) {
+            dampedCamDeltaX *= (absDeltaCamX / 0.03f);
         }
 
         float alphaY = 1.0f - (float) Math.pow(1.0 - factorYaw, deltaSec * 20.0);
         float alphaX = 1.0f - (float) Math.pow(1.0 - factorPitch, deltaSec * 20.0);
-        float stepY = kinematicYaw + dampedDeltaY * alphaY;
-        float stepX = kinematicPitch + dampedDeltaX * alphaX;
+        float stepCamY = kinematicCamYaw + dampedCamDeltaY * alphaY;
+        float stepCamX = kinematicCamPitch + dampedCamDeltaX * alphaX;
 
-        float newYaw = curYaw + stepY;
-        float newPitch = Mth.clamp(curPitch + stepX, -89.5F, 89.5F);
+        float newCamYaw = curCamYaw + stepCamY;
+        float newCamPitch = Mth.clamp(curCamPitch + stepCamX, -89.5F, 89.5F);
+
+        float newPlayerYaw;
+        float newPlayerPitch;
 
         if (isShoulder) {
-            ShoulderSurfingCompat.setCameraRotation(newYaw, newPitch);
+            float absDeltaPlayerY = Math.abs(deltaPlayerY);
+            float absDeltaPlayerX = Math.abs(deltaPlayerX);
+            float dampedPlayerDeltaY = deltaPlayerY;
+            float dampedPlayerDeltaX = deltaPlayerX;
+            if (absDeltaPlayerY < 0.03f) {
+                dampedPlayerDeltaY *= (absDeltaPlayerY / 0.03f);
+            }
+            if (absDeltaPlayerX < 0.03f) {
+                dampedPlayerDeltaX *= (absDeltaPlayerX / 0.03f);
+            }
+            float stepPlayerY = kinematicPlayerYaw + dampedPlayerDeltaY * alphaY;
+            float stepPlayerX = kinematicPlayerPitch + dampedPlayerDeltaX * alphaX;
+            newPlayerYaw = curPlayerYaw + stepPlayerY;
+            newPlayerPitch = Mth.clamp(curPlayerPitch + stepPlayerX, -89.5F, 89.5F);
+
+            ShoulderSurfingCompat.setCameraRotation(newCamYaw, newCamPitch);
+        } else {
+            newPlayerYaw = newCamYaw;
+            newPlayerPitch = newCamPitch;
         }
 
         // 同步端点与头部转向
-        player.setYRot(newYaw);
-        player.setXRot(newPitch);
-        player.yRotO = newYaw;
-        player.xRotO = newPitch;
-        player.yHeadRot = newYaw;
-        player.yHeadRotO = newYaw;
+        player.setYRot(newPlayerYaw);
+        player.setXRot(newPlayerPitch);
+        player.yRotO = newPlayerYaw;
+        player.xRotO = newPlayerPitch;
+        player.yHeadRot = newPlayerYaw;
+        player.yHeadRotO = newPlayerYaw;
 
-        lastLockedYaw = newYaw;
-        lastLockedPitch = newPitch;
+        lastLockedYaw = isShoulder ? newCamYaw : newPlayerYaw;
+        lastLockedPitch = isShoulder ? newCamPitch : newPlayerPitch;
         wasLockedLastFrame = true;
     }
 

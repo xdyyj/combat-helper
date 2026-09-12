@@ -32,4 +32,9 @@ public class ClientModEvents {
         event.register(LOCK_ON_KEY);
         event.register(DEBUG_PANEL_KEY);
     }
+
+    @SubscribeEvent
+    public static void onClientSetup(net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent event) {
+        event.enqueueWork(com.xdyyj.autoattacker.compat.ShoulderSurfingCompat::neutralizeLegacyShoulderSurfingIntegrations);
+    }
 }
