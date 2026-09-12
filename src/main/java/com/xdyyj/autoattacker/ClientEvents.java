@@ -206,6 +206,7 @@ public class ClientEvents {
         staticLastPredictedCamPitch = 0.0f;
         resetTargetTracking();
         AutoBallisticsTracker.clearTransientReferences();
+        com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
     }
 
     @SubscribeEvent
@@ -724,6 +725,7 @@ public class ClientEvents {
             lastTrackedTarget = null;
             lastDestYaw = Float.NaN;
             lastDestPitch = Float.NaN;
+            com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
             return;
         }
 
@@ -735,6 +737,7 @@ public class ClientEvents {
             lastTrackedTarget = null;
             lastDestYaw = Float.NaN;
             lastDestPitch = Float.NaN;
+            com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
             return;
         }
 
