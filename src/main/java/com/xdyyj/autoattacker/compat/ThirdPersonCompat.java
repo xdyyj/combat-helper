@@ -3,6 +3,7 @@ package com.xdyyj.autoattacker.compat;
 import net.minecraft.client.Camera;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.fml.ModList;
 
@@ -11,6 +12,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Optional;
 
 /**
  * 统一第三人称视角自瞄与物理相机适配器 (Unified Third-Person Camera & Aim Adapter)
@@ -61,6 +63,10 @@ public final class ThirdPersonCompat {
     private static MethodHandle lwIsAimingHandle = null;
     private static MethodHandle lwCameraAdjustmentControllerHandle = null;
     private static MethodHandle lwIsAdjustingHandle = null;
+    private static MethodHandle lwApplyPlayerRotationHandle = null;
+    private static Method lwPlayerRotationParamsCustomMethod = null;
+    private static Object lwSmoothingImmediate = null;
+    private static Field lwRefreshPredictedTargetField = null;
 
     private static volatile boolean wasLeawindAimingForced = false;
 
@@ -232,6 +238,23 @@ public final class ThirdPersonCompat {
                     Class<?> adjCtrlClass = Class.forName("io.github.leawind.thirdperson.internal.logic.scheduler.camera.CameraAdjustmentController");
                     Method mIsAdjusting = adjCtrlClass.getMethod("isAdjusting");
                     lwIsAdjustingHandle = lookup.unreflect(mIsAdjusting);
+                } catch (Throwable ignored) {}
+
+                try {
+                    Class<?> paramsClass = Class.forName("io.github.leawind.thirdperson.internal.logic.base.rotation.PlayerRotationParameters");
+                    Class<?> smoothingClass = Class.forName("io.github.leawind.thirdperson.internal.logic.base.rotation.PlayerRotationSmoothing");
+                    Field fImmediate = smoothingClass.getField("IMMEDIATE");
+                    lwSmoothingImmediate = fImmediate.get(null);
+                    lwPlayerRotationParamsCustomMethod = paramsClass.getMethod("custom", Optional.class, double.class, smoothingClass);
+
+                    Method mApplyRot = schedRuntimeClass.getMethod("applyPlayerRotation", paramsClass);
+                    lwApplyPlayerRotationHandle = lookup.unreflect(mApplyRot);
+                } catch (Throwable ignored) {}
+
+                try {
+                    Class<?> schedIntegClass = Class.forName("io.github.leawind.thirdperson.internal.logic.scheduler.MinecraftSchedulingIntegration");
+                    lwRefreshPredictedTargetField = schedIntegClass.getDeclaredField("refreshPredictedTargetEachFrame");
+                    lwRefreshPredictedTargetField.setAccessible(true);
                 } catch (Throwable ignored) {}
 
                 leawindLoaded = true;
@@ -423,6 +446,7 @@ public final class ThirdPersonCompat {
 
     /**
      * 同步设置第三人称相机的角度 (驱动屏幕准星精准对齐目标)
+     * 注意：本方法仅驱动相机视角与准星，绝不污染玩家实体的朝向数据包！
      */
     public static void setCameraRotation(float yaw, float pitch) {
         if (!initialized) init();
@@ -453,21 +477,74 @@ public final class ThirdPersonCompat {
                         }
                     }
 
-                    // 2. 同步玩家交互/面朝方向 (注意 LookRotation 构造参数：yaw 前，pitch 后！)
-                    if (lwLookRotationCtor != null && lwCommitInteractionRotationHandle != null) {
-                        Object lookRot = lwLookRotationCtor.invoke(yaw, pitch);
-                        if (lookRot != null) {
-                            lwCommitInteractionRotationHandle.invoke(base, lookRot);
-                        }
-                    }
-
-                    // 3. 激活 Leawind Aiming 态以开启准星渲染并居中镜头
+                    // 2. 激活 Leawind Aiming 态以开启准星渲染并居中镜头
                     if (lwGetSchedulerRuntimeHandle != null && lwSetAimingHandle != null) {
                         Object sched = lwGetSchedulerRuntimeHandle.invoke();
                         if (sched != null) {
                             lwSetAimingHandle.invoke(sched, true);
                             wasLeawindAimingForced = true;
                         }
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    /**
+     * 同步设置玩家物理实体朝向与网络射击向量 (驱动子弹/箭矢从玩家视线精准射向目标)
+     * 消除第三人称模式下的视差偏斜问题 (Parallax Divergence)
+     */
+    public static void syncPlayerRotation(float playerYaw, float playerPitch) {
+        if (!initialized) init();
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc != null && mc.player != null) {
+            mc.player.setYRot(playerYaw);
+            mc.player.setXRot(playerPitch);
+            mc.player.yRotO = playerYaw;
+            mc.player.xRotO = playerPitch;
+            mc.player.yHeadRot = playerYaw;
+            mc.player.yHeadRotO = playerYaw;
+
+            // 立即向服务端发送玩家转向数据包，确保 TAC:Z / Point Blank 等基于服务端玩家角度判定的模组无延迟获取准确朝向
+            if (mc.getConnection() != null) {
+                try {
+                    mc.getConnection().send(new ServerboundMovePlayerPacket.Rot(playerYaw, playerPitch, mc.player.onGround()));
+                } catch (Throwable ignored) {}
+            }
+        }
+
+        if (isLeawindActive() && lwGetBaseRuntimeHandle != null) {
+            try {
+                Object base = lwGetBaseRuntimeHandle.invoke();
+                if (base != null) {
+                    Object lookRot = null;
+                    if (lwLookRotationCtor != null) {
+                        lookRot = lwLookRotationCtor.invoke(playerYaw, playerPitch);
+                    }
+
+                    // 1. 强制设置 Leawind 的玩家旋转参数为 IMMEDIATE，杜绝内部平滑插值导致朝向偏斜
+                    if (lookRot != null && lwApplyPlayerRotationHandle != null && lwPlayerRotationParamsCustomMethod != null && lwSmoothingImmediate != null) {
+                        Object optRot = Optional.of(lookRot);
+                        Object params = lwPlayerRotationParamsCustomMethod.invoke(null, optRot, 0.0, lwSmoothingImmediate);
+                        if (params != null && lwGetSchedulerRuntimeHandle != null) {
+                            Object sched = lwGetSchedulerRuntimeHandle.invoke();
+                            if (sched != null) {
+                                lwApplyPlayerRotationHandle.invoke(sched, params);
+                            }
+                        }
+                    }
+
+                    // 2. 抑制 Leawind 渲染帧前的自动射线目标重算 (refreshPredictedTargetEachFrame = false)，防止其覆盖玩家自瞄角度
+                    if (lwRefreshPredictedTargetField != null) {
+                        try {
+                            lwRefreshPredictedTargetField.setBoolean(null, false);
+                        } catch (Throwable ignored) {}
+                    }
+
+                    // 3. 提交玩家交互旋转并向服务端同步
+                    if (lookRot != null && lwCommitInteractionRotationHandle != null) {
+                        lwCommitInteractionRotationHandle.invoke(base, lookRot);
                     }
                 }
             } catch (Throwable ignored) {}

@@ -324,16 +324,12 @@ public class ClientEvents {
                                     }
                                 }
 
-                                if (mc.getConnection() != null) {
-                                    mc.getConnection().send(new ServerboundMovePlayerPacket.Rot(sendYaw, sendPitch, player.onGround()));
-                                }
                                 if (ShoulderSurfingCompat.isShoulderSurfing()) {
-                                    player.setYRot(sendYaw);
-                                    player.setXRot(sendPitch);
-                                    player.yRotO = sendYaw;
-                                    player.xRotO = sendPitch;
-                                    player.yHeadRot = sendYaw;
-                                    player.yHeadRotO = sendYaw;
+                                    ShoulderSurfingCompat.syncPlayerRotation(sendYaw, sendPitch);
+                                } else {
+                                    if (mc.getConnection() != null) {
+                                        mc.getConnection().send(new ServerboundMovePlayerPacket.Rot(sendYaw, sendPitch, player.onGround()));
+                                    }
                                 }
                             }
 
@@ -466,12 +462,7 @@ public class ClientEvents {
                                     // 阶段 2：弓弦已 100% 彻底拉满！进入瞄准就绪释放判定
                                     if (onTarget) {
                                         if (isShoulder) {
-                                            player.setYRot(staticLastPredictedYaw);
-                                            player.setXRot(staticLastPredictedPitch);
-                                            player.yRotO = staticLastPredictedYaw;
-                                            player.xRotO = staticLastPredictedPitch;
-                                            player.yHeadRot = staticLastPredictedYaw;
-                                            player.yHeadRotO = staticLastPredictedYaw;
+                                            ShoulderSurfingCompat.syncPlayerRotation(staticLastPredictedYaw, staticLastPredictedPitch);
                                         }
                                         // 准星锁定在目标容差内，瞬间松开左键，满威力击发出箭！
                                         lastGunShootTime = System.currentTimeMillis();
@@ -490,12 +481,7 @@ public class ClientEvents {
                             gunReleaseCoolTicks = 0;
                             if (onTarget) {
                                 if (isShoulder) {
-                                    player.setYRot(staticLastPredictedYaw);
-                                    player.setXRot(staticLastPredictedPitch);
-                                    player.yRotO = staticLastPredictedYaw;
-                                    player.xRotO = staticLastPredictedPitch;
-                                    player.yHeadRot = staticLastPredictedYaw;
-                                    player.yHeadRotO = staticLastPredictedYaw;
+                                    ShoulderSurfingCompat.syncPlayerRotation(staticLastPredictedYaw, staticLastPredictedPitch);
                                 }
                                 lastGunShootTime = System.currentTimeMillis();
                                 if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isSemiAuto(gunStatus)) {
@@ -915,13 +901,15 @@ public class ClientEvents {
 
             if (isShoulder) {
                 ShoulderSurfingCompat.setCameraRotation(hardCamYaw, hardCamPitch);
+                ShoulderSurfingCompat.syncPlayerRotation(hardPlayerYaw, hardPlayerPitch);
+            } else {
+                player.setYRot(hardPlayerYaw);
+                player.setXRot(hardPlayerPitch);
+                player.yRotO = hardPlayerYaw;
+                player.xRotO = hardPlayerPitch;
+                player.yHeadRot = hardPlayerYaw;
+                player.yHeadRotO = hardPlayerYaw;
             }
-            player.setYRot(hardPlayerYaw);
-            player.setXRot(hardPlayerPitch);
-            player.yRotO = hardPlayerYaw;
-            player.xRotO = hardPlayerPitch;
-            player.yHeadRot = hardPlayerYaw;
-            player.yHeadRotO = hardPlayerYaw;
 
             lastLockedYaw = hardCamYaw;
             lastLockedPitch = hardCamPitch;
@@ -1073,18 +1061,18 @@ public class ClientEvents {
             newPlayerPitch = Mth.clamp(curPlayerPitch + stepPlayerX, -89.5F, 89.5F);
 
             ShoulderSurfingCompat.setCameraRotation(newCamYaw, newCamPitch);
+            ShoulderSurfingCompat.syncPlayerRotation(newPlayerYaw, newPlayerPitch);
         } else {
             newPlayerYaw = newCamYaw;
             newPlayerPitch = newCamPitch;
+            // 同步端点与头部转向
+            player.setYRot(newPlayerYaw);
+            player.setXRot(newPlayerPitch);
+            player.yRotO = newPlayerYaw;
+            player.xRotO = newPlayerPitch;
+            player.yHeadRot = newPlayerYaw;
+            player.yHeadRotO = newPlayerYaw;
         }
-
-        // 同步端点与头部转向
-        player.setYRot(newPlayerYaw);
-        player.setXRot(newPlayerPitch);
-        player.yRotO = newPlayerYaw;
-        player.xRotO = newPlayerPitch;
-        player.yHeadRot = newPlayerYaw;
-        player.yHeadRotO = newPlayerYaw;
 
         lastLockedYaw = isShoulder ? newCamYaw : newPlayerYaw;
         lastLockedPitch = isShoulder ? newCamPitch : newPlayerPitch;

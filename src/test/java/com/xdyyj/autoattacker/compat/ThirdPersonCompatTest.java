@@ -21,6 +21,7 @@ class ThirdPersonCompatTest {
 
         // Camera calls should return safe fallbacks without throwing
         assertDoesNotThrow(() -> ThirdPersonCompat.setCameraRotation(45.0f, 15.0f));
+        assertDoesNotThrow(() -> ThirdPersonCompat.syncPlayerRotation(45.0f, 15.0f));
         assertDoesNotThrow(() -> ThirdPersonCompat.setAiming(true));
         assertDoesNotThrow(ThirdPersonCompat::resetAiming);
         assertDoesNotThrow(ThirdPersonCompat::getCameraPosition);
@@ -38,6 +39,7 @@ class ThirdPersonCompatTest {
         assertEquals(ThirdPersonCompat.getCameraPitch(), ShoulderSurfingCompat.getCameraPitch());
 
         assertDoesNotThrow(() -> ShoulderSurfingCompat.setCameraRotation(90.0f, 0.0f));
+        assertDoesNotThrow(() -> ShoulderSurfingCompat.syncPlayerRotation(90.0f, 0.0f));
         assertNotNull(ShoulderSurfingCompat.getCameraPosition());
         assertNotNull(ShoulderSurfingCompat.getCameraLookVector());
     }

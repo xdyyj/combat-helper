@@ -62,6 +62,13 @@ public final class ShoulderSurfingCompat {
     }
 
     /**
+     * 同步设置玩家物理实体朝向与网络射击向量 (驱动子弹/箭矢从玩家视线精准射向目标)
+     */
+    public static void syncPlayerRotation(float playerYaw, float playerPitch) {
+        ThirdPersonCompat.syncPlayerRotation(playerYaw, playerPitch);
+    }
+
+    /**
      * 获取第三人称相机的空间坐标位置
      */
     public static Vec3 getCameraPosition() {
