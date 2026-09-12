@@ -40,6 +40,7 @@ import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
 import com.xdyyj.autoattacker.ui.TacticalDebugPanel;
 import com.xdyyj.autoattacker.render.TrajectoryRenderer;
+import com.xdyyj.autoattacker.compat.ShoulderSurfingCompat;
 
 import java.util.List;
 import java.util.Optional;
@@ -239,6 +240,14 @@ public class ClientEvents {
             return;
         }
 
+        if (ShoulderSurfingCompat.isShoulderSurfing() && ShoulderSurfingCompat.isFreeLooking()) {
+            this.didSuppressVanillaAttack = false;
+            if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
+                com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
+            }
+            return;
+        }
+
         if (event.phase == TickEvent.Phase.START) {
             while (ClientModEvents.DEBUG_PANEL_KEY.consumeClick()) {
                 TacticalDebugPanel.toggleControl();
@@ -380,8 +389,9 @@ public class ClientEvents {
                                        !com.xdyyj.autoattacker.weapon.FirearmAdapter.isBolting(player);
                     
                     if (canShoot) {
-                        float currentYaw = player.getYRot();
-                        float currentPitch = player.getXRot();
+                        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
+                        float currentYaw = isShoulder ? ShoulderSurfingCompat.getCameraYaw() : player.getYRot();
+                        float currentPitch = isShoulder ? ShoulderSurfingCompat.getCameraPitch() : player.getXRot();
                         float targetAimYaw = (staticLastPredictedAim != null) ? staticLastPredictedAim.targetYaw : staticLastPredictedYaw;
                         float targetAimPitch = (staticLastPredictedAim != null) ? staticLastPredictedAim.targetPitch : currentPitch;
                         float yawDiff = Math.abs(Mth.wrapDegrees(targetAimYaw - currentYaw));
@@ -390,6 +400,8 @@ public class ClientEvents {
                         // 远距离 (如 68m) 射击时准星容差自适应微缩，提升远距点杀与爆头精度
                         double targetDist = player.distanceTo(currentTarget);
                         float maxDiff = (targetDist > 35.0) ? 9.0f : 14.0f;
+                        boolean onTarget = (yawDiff <= maxDiff && pitchDiff <= maxDiff) ||
+                                (isShoulder && mc.hitResult instanceof EntityHitResult entityHit && entityHit.getEntity() == currentTarget);
 
                         if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isReleaseFire(gunStatus)) {
                             // 蓄力释放型武器 (如 JEG 复合弓/原始弓 RELEASE_FIRE):
@@ -418,7 +430,7 @@ public class ClientEvents {
                                     com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(true, player);
                                 } else {
                                     // 阶段 2：弓弦已 100% 彻底拉满！进入瞄准就绪释放判定
-                                    if (yawDiff <= maxDiff && pitchDiff <= maxDiff) {
+                                    if (onTarget) {
                                         // 准星锁定在目标容差内，瞬间松开左键，满威力击发出箭！
                                         lastGunShootTime = System.currentTimeMillis();
                                         com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
@@ -434,7 +446,7 @@ public class ClientEvents {
                             // 普通全自动 / 半自动枪械
                             gunReleaseChargeTicks = 0;
                             gunReleaseCoolTicks = 0;
-                            if (yawDiff <= maxDiff && pitchDiff <= maxDiff) {
+                            if (onTarget) {
                                 lastGunShootTime = System.currentTimeMillis();
                                 if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isSemiAuto(gunStatus)) {
                                     // 半自动武器 (如 Glock, 沙漠之鹰, SPR-15 DMR, 单发步枪/狙击枪):
@@ -658,6 +670,14 @@ public class ClientEvents {
         Player player = mc.player;
         if (player == null || mc.level == null || mc.isPaused()) return;
 
+        if (ShoulderSurfingCompat.isShoulderSurfing() && ShoulderSurfingCompat.isFreeLooking()) {
+            wasLockedLastFrame = false;
+            lastTrackedTarget = null;
+            lastDestYaw = Float.NaN;
+            lastDestPitch = Float.NaN;
+            return;
+        }
+
         if (currentTarget == null) {
             lastAimFrameNanos = 0L;
             staticCurrentTarget = null;
@@ -679,9 +699,11 @@ public class ClientEvents {
 
     private void applyAimAssist(Player player, LivingEntity target, float partialTick, float deltaSec) {
         Minecraft mc = Minecraft.getInstance();
+        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
+
         // --- 鼠标死区与目标切换机制 (Mouse Deadzone & Switch Logic) ---
-        float curYaw = player.getYRot();
-        float curPitch = player.getXRot();
+        float curYaw = isShoulder ? ShoulderSurfingCompat.getCameraYaw() : player.getYRot();
+        float curPitch = isShoulder ? ShoulderSurfingCompat.getCameraPitch() : player.getXRot();
         if (wasLockedLastFrame) {
             float mouseDeltaYaw = Mth.wrapDegrees(curYaw - lastLockedYaw);
             float mouseDeltaPitch = curPitch - lastLockedPitch;
@@ -782,6 +804,37 @@ public class ClientEvents {
             staticLastPredictedYaw = directYaw;
         }
 
+        float destCamYaw = destYaw;
+        float destCamPitch = destPitch;
+
+        if (isShoulder) {
+            Vec3 camPos = ShoulderSurfingCompat.getCameraPosition();
+            double cdx = tx - camPos.x;
+            double cdy = baseTargetY - camPos.y;
+            double cdz = tz - camPos.z;
+            double cHoriz = Math.sqrt(cdx * cdx + cdz * cdz);
+            float camDirectYaw = (float) (Mth.atan2(cdz, cdx) * (180D / Math.PI)) - 90.0F;
+            float camDirectPitch = (float) -(Mth.atan2(cdy, cHoriz) * (180D / Math.PI));
+
+            if (isHoldingBow && profile != null && !profile.isHoming && AutoAttackerConfig.ENABLE_AIM_PREDICT.get() && staticLastPredictedAim != null) {
+                float leadYawDelta = Mth.wrapDegrees(staticLastPredictedAim.targetYaw - directYaw);
+                float leadPitchDelta = staticLastPredictedAim.targetPitch - directPitch;
+
+                double stability = computeMotionStability(lastMeasuredVelocity, smoothedTargetVelocity);
+                double configuredBlend = AutoAttackerConfig.AIM_PREDICT_BLEND.get();
+                float strength = (float) Mth.clamp(configuredBlend * stability, 0.0D, 1.0D);
+
+                destCamYaw = camDirectYaw + leadYawDelta * strength;
+                destCamPitch = camDirectPitch + leadPitchDelta * strength;
+            } else {
+                destCamYaw = camDirectYaw;
+                destCamPitch = camDirectPitch;
+            }
+        }
+
+        float targetTrackYaw = isShoulder ? destCamYaw : destYaw;
+        float targetTrackPitch = isShoulder ? destCamPitch : destPitch;
+
         // 视线丢失宽容期内不强行拉拽视角撞墙
         if (lostTargetGraceTicks > 0) {
             wasLockedLastFrame = false;
@@ -795,9 +848,12 @@ public class ClientEvents {
         // 极速强锁 (Hard-Lock / Snap Lock): 0-Frame 绝对吸附死锁
         // ==========================================
         if (AutoAttackerConfig.AIM_LOCK_TYPE.get() == AutoAttackerConfig.AimLockType.HARD) {
-            float hardYaw = destYaw;
-            float hardPitch = Mth.clamp(destPitch, -89.5F, 89.5F);
+            float hardYaw = targetTrackYaw;
+            float hardPitch = Mth.clamp(targetTrackPitch, -89.5F, 89.5F);
 
+            if (isShoulder) {
+                ShoulderSurfingCompat.setCameraRotation(hardYaw, hardPitch);
+            }
             player.setYRot(hardYaw);
             player.setXRot(hardPitch);
             player.yRotO = hardYaw;
@@ -809,8 +865,8 @@ public class ClientEvents {
             lastLockedPitch = hardPitch;
             wasLockedLastFrame = true;
             lastTrackedTarget = target;
-            lastDestYaw = destYaw;
-            lastDestPitch = destPitch;
+            lastDestYaw = targetTrackYaw;
+            lastDestPitch = targetTrackPitch;
             return;
         }
 
@@ -822,18 +878,18 @@ public class ClientEvents {
         float kinematicYaw = 0.0f;
         float kinematicPitch = 0.0f;
         if (wasLockedLastFrame && lastTrackedTarget == target && !Float.isNaN(lastDestYaw) && !Float.isNaN(lastDestPitch)) {
-            kinematicYaw = Mth.wrapDegrees(destYaw - lastDestYaw);
-            kinematicPitch = destPitch - lastDestPitch;
+            kinematicYaw = Mth.wrapDegrees(targetTrackYaw - lastDestYaw);
+            kinematicPitch = targetTrackPitch - lastDestPitch;
         }
         lastTrackedTarget = target;
-        lastDestYaw = destYaw;
-        lastDestPitch = destPitch;
+        lastDestYaw = targetTrackYaw;
+        lastDestPitch = targetTrackPitch;
 
-        float currentYawAfterKinematic = player.getYRot() + kinematicYaw;
-        float currentPitchAfterKinematic = player.getXRot() + kinematicPitch;
+        float currentYawAfterKinematic = curYaw + kinematicYaw;
+        float currentPitchAfterKinematic = curPitch + kinematicPitch;
 
-        float deltaY = Mth.wrapDegrees(destYaw - currentYawAfterKinematic);
-        float deltaX = Mth.wrapDegrees(destPitch - currentPitchAfterKinematic);
+        float deltaY = Mth.wrapDegrees(targetTrackYaw - currentYawAfterKinematic);
+        float deltaX = Mth.wrapDegrees(targetTrackPitch - currentPitchAfterKinematic);
 
         float baseFactor = AutoAttackerConfig.AIM_ASSIST_SPEED.get().floatValue();
         if (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get()) {
@@ -906,8 +962,12 @@ public class ClientEvents {
         float stepY = kinematicYaw + dampedDeltaY * alphaY;
         float stepX = kinematicPitch + dampedDeltaX * alphaX;
 
-        float newYaw = player.getYRot() + stepY;
-        float newPitch = Mth.clamp(player.getXRot() + stepX, -89.5F, 89.5F);
+        float newYaw = curYaw + stepY;
+        float newPitch = Mth.clamp(curPitch + stepX, -89.5F, 89.5F);
+
+        if (isShoulder) {
+            ShoulderSurfingCompat.setCameraRotation(newYaw, newPitch);
+        }
 
         // 同步端点与头部转向
         player.setYRot(newYaw);
@@ -930,8 +990,19 @@ public class ClientEvents {
      * 判定玩家准星是否正在指向特定实体 (线段与 Hitbox 相交判定，或极小角度对齐)
      */
     private LivingEntity getCrosshairPointingTarget(Player player, double range) {
-        Vec3 eyePos = player.getEyePosition();
-        Vec3 lookVec = player.getViewVector(1.0F);
+        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
+        if (isShoulder) {
+            HitResult hitResult = Minecraft.getInstance().hitResult;
+            if (hitResult instanceof EntityHitResult entityHit) {
+                Entity hitEntity = entityHit.getEntity();
+                if (hitEntity instanceof LivingEntity living && isValidTarget(player, living)) {
+                    return living;
+                }
+            }
+        }
+
+        Vec3 eyePos = isShoulder ? ShoulderSurfingCompat.getCameraPosition() : player.getEyePosition();
+        Vec3 lookVec = isShoulder ? ShoulderSurfingCompat.getCameraLookVector() : player.getViewVector(1.0F);
         Vec3 endPos = eyePos.add(lookVec.scale(range));
         AABB searchBox = player.getBoundingBox().inflate(range);
 
@@ -980,8 +1051,9 @@ public class ClientEvents {
      */
     private LivingEntity getPrioritizedTarget(Player player, double range, float maxAngle,
                                               AutoAttackerConfig.SwitchPriority priority, LivingEntity excludeTarget) {
-        Vec3 eyePos = player.getEyePosition();
-        Vec3 lookVec = player.getViewVector(1.0F);
+        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
+        Vec3 eyePos = isShoulder ? ShoulderSurfingCompat.getCameraPosition() : player.getEyePosition();
+        Vec3 lookVec = isShoulder ? ShoulderSurfingCompat.getCameraLookVector() : player.getViewVector(1.0F);
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
@@ -1031,8 +1103,9 @@ public class ClientEvents {
     }
 
     private LivingEntity findSwitchTarget(Player player, LivingEntity excludeTarget, double range, float maxAngle) {
-        Vec3 eyePos = player.getEyePosition();
-        Vec3 lookVec = player.getViewVector(1.0F);
+        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
+        Vec3 eyePos = isShoulder ? ShoulderSurfingCompat.getCameraPosition() : player.getEyePosition();
+        Vec3 lookVec = isShoulder ? ShoulderSurfingCompat.getCameraLookVector() : player.getViewVector(1.0F);
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
