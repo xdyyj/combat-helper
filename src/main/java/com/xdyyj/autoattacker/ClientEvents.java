@@ -819,18 +819,11 @@ public class ClientEvents {
         // 当角色自身移动 (例如按 D 往右走位) 时，目标相对玩家视线必然向左转动。
         // 立即前馈补偿该角位移，驱动镜头自动向左拉拽，消除走位滞后，使准星绝对咬死在目标身上！
         // ==========================================
-        boolean isThirdPerson = !mc.options.getCameraType().isFirstPerson();
-
         float kinematicYaw = 0.0f;
         float kinematicPitch = 0.0f;
         if (wasLockedLastFrame && lastTrackedTarget == target && !Float.isNaN(lastDestYaw) && !Float.isNaN(lastDestPitch)) {
             kinematicYaw = Mth.wrapDegrees(destYaw - lastDestYaw);
             kinematicPitch = destPitch - lastDestPitch;
-            if (isThirdPerson) {
-                // 第三人称视角优化：适当平抑前馈刚度，避免角色横移带动摄像机轨道旋转半径过大引起的剧烈抖动
-                kinematicYaw *= 0.65f;
-                kinematicPitch *= 0.65f;
-            }
         }
         lastTrackedTarget = target;
         lastDestYaw = destYaw;
@@ -849,15 +842,6 @@ public class ClientEvents {
         // 角色走位/横移时自动增强角速度追踪刚度，防止剧烈横拉时被惯性甩脱
         if (player.getDeltaMovement().horizontalDistanceSqr() > 0.0004) {
             baseFactor = Math.max(baseFactor, 0.40f);
-        }
-
-        // 第三人称近距离 (2~5m) 视距自适应平滑：防止越肩视角下近距离大视角急拉造成的画面晃动与晕动感
-        if (isThirdPerson) {
-            double dist = player.distanceTo(target);
-            if (dist < 6.0) {
-                float distDampen = (float) Mth.clamp(dist / 6.0, 0.60, 1.0);
-                baseFactor *= distDampen;
-            }
         }
 
         // 枪械后坐力抑制 (平滑连续阻尼 Anti-Recoil，消除高频抖动) 与机瞄感知 (ADS Sensing)
@@ -922,13 +906,6 @@ public class ClientEvents {
         float stepY = kinematicYaw + dampedDeltaY * alphaY;
         float stepX = kinematicPitch + dampedDeltaX * alphaX;
 
-        if (isThirdPerson) {
-            // 第三人称视角下限制单帧最大角步进，彻底规避急转造成的画面剧烈遮挡与失重晕动感
-            float maxStep = (float) (24.0 * (deltaSec * 60.0));
-            stepY = Mth.clamp(stepY, -maxStep, maxStep);
-            stepX = Mth.clamp(stepX, -maxStep, maxStep);
-        }
-
         float newYaw = player.getYRot() + stepY;
         float newPitch = Mth.clamp(player.getXRot() + stepX, -89.5F, 89.5F);
 
@@ -953,14 +930,8 @@ public class ClientEvents {
      * 判定玩家准星是否正在指向特定实体 (线段与 Hitbox 相交判定，或极小角度对齐)
      */
     private LivingEntity getCrosshairPointingTarget(Player player, double range) {
-        Minecraft mc = Minecraft.getInstance();
-        boolean isThirdPerson = !mc.options.getCameraType().isFirstPerson();
-        net.minecraft.client.Camera camera = mc.gameRenderer.getMainCamera();
-
-        Vec3 eyePos = (isThirdPerson && camera != null) ? camera.getPosition() : player.getEyePosition();
-        Vec3 lookVec = (isThirdPerson && camera != null)
-                ? Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize()
-                : player.getViewVector(1.0F);
+        Vec3 eyePos = player.getEyePosition();
+        Vec3 lookVec = player.getViewVector(1.0F);
         Vec3 endPos = eyePos.add(lookVec.scale(range));
         AABB searchBox = player.getBoundingBox().inflate(range);
 
@@ -1009,14 +980,8 @@ public class ClientEvents {
      */
     private LivingEntity getPrioritizedTarget(Player player, double range, float maxAngle,
                                               AutoAttackerConfig.SwitchPriority priority, LivingEntity excludeTarget) {
-        Minecraft mc = Minecraft.getInstance();
-        boolean isThirdPerson = !mc.options.getCameraType().isFirstPerson();
-        net.minecraft.client.Camera camera = mc.gameRenderer.getMainCamera();
-
-        Vec3 eyePos = (isThirdPerson && camera != null) ? camera.getPosition() : player.getEyePosition();
-        Vec3 lookVec = (isThirdPerson && camera != null)
-                ? Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize()
-                : player.getViewVector(1.0F);
+        Vec3 eyePos = player.getEyePosition();
+        Vec3 lookVec = player.getViewVector(1.0F);
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
@@ -1066,14 +1031,8 @@ public class ClientEvents {
     }
 
     private LivingEntity findSwitchTarget(Player player, LivingEntity excludeTarget, double range, float maxAngle) {
-        Minecraft mc = Minecraft.getInstance();
-        boolean isThirdPerson = !mc.options.getCameraType().isFirstPerson();
-        net.minecraft.client.Camera camera = mc.gameRenderer.getMainCamera();
-
-        Vec3 eyePos = (isThirdPerson && camera != null) ? camera.getPosition() : player.getEyePosition();
-        Vec3 lookVec = (isThirdPerson && camera != null)
-                ? Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize()
-                : player.getViewVector(1.0F);
+        Vec3 eyePos = player.getEyePosition();
+        Vec3 lookVec = player.getViewVector(1.0F);
         AABB searchBox = player.getBoundingBox().inflate(range);
 
         List<LivingEntity> entities = player.level().getEntitiesOfClass(LivingEntity.class, searchBox,
@@ -1307,17 +1266,13 @@ public class ClientEvents {
         boolean isHoldingBow = !bowStack.isEmpty();
         AutoBallisticsTracker.BallisticsProfile profile = isHoldingBow ? AutoBallisticsTracker.getProfile(bowStack) : null;
         double drag = profile != null ? profile.drag : 0.99D;
-        double waterDrag = profile != null ? profile.waterDrag : 0.60D;
 
         boolean isMoving = (effectiveVel.x * effectiveVel.x + effectiveVel.y * effectiveVel.y + effectiveVel.z * effectiveVel.z) > 0.0004;
         if (!isMoving) {
-            AutoBallisticsTracker.TrajectorySolution staticTraj = AutoBallisticsTracker.solveTrajectory(player.level(), eye, baseAimPoint, speed, gravity, drag, waterDrag);
+            AutoBallisticsTracker.TrajectorySolution staticTraj = AutoBallisticsTracker.solveTrajectory(eye, baseAimPoint, speed, gravity, drag);
             float staticPitch;
             if (staticTraj != null && staticTraj.reachable) {
                 staticPitch = staticTraj.pitchDeg;
-            } else if (player.isInWater()) {
-                staticPitch = baseDirectPitch;
-                TacticalDebugPanel.setStatus("超出水下有效射程 [不可达]");
             } else {
                 staticPitch = baseDirectPitch;
             }
@@ -1331,7 +1286,7 @@ public class ClientEvents {
         double maxTicks = Math.min(60.0D, maxDist * 1.5D);
 
         for (int i = 0; i < 3; i++) {
-            bestTraj = AutoBallisticsTracker.solveTrajectory(player.level(), eye, targetPoint, speed, gravity, drag, waterDrag);
+            bestTraj = AutoBallisticsTracker.solveTrajectory(eye, targetPoint, speed, gravity, drag);
             double time;
             if (bestTraj != null && bestTraj.reachable) {
                 time = Mth.clamp(bestTraj.flightTicks, 0.0D, maxTicks);
@@ -1372,10 +1327,6 @@ public class ClientEvents {
         float targetPitch;
         if (bestTraj != null && bestTraj.reachable) {
             targetPitch = bestTraj.pitchDeg;
-        } else if (player.isInWater()) {
-            float directPitch = (float) -(Mth.atan2(targetPoint.y - eye.y, Math.max(0.01, horizDist)) * (180D / Math.PI));
-            targetPitch = directPitch - (float) Math.min(3.0, horizDist * gravity * 1.0);
-            TacticalDebugPanel.setStatus("水下目标超出有效物理射程 [不可达]");
         } else if (horizDist < 0.2D || gravity <= 1.0E-6D) {
             targetPitch = (float) -(Mth.atan2(targetPoint.y - eye.y, Math.max(0.01, horizDist)) * (180D / Math.PI));
         } else {

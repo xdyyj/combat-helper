@@ -51,7 +51,6 @@ public final class AutoBallisticsTracker {
         public float speed;
         public double gravity;
         public double drag;
-        public double waterDrag;
         public boolean isHoming;
         public double maxRange;
         public float drawSpeed;      // 蓄力速度倍率 (标准 1.0f, 神话 +60% 则为 1.6f)
@@ -59,18 +58,13 @@ public final class AutoBallisticsTracker {
         public long lastUpdated;     // 录入/更新时间戳 (毫秒)
 
         public BallisticsProfile(float speed, double gravity, double drag, boolean isHoming, double maxRange, float drawSpeed, int minChargeTicks) {
-            this(speed, gravity, drag, 0.60D, isHoming, maxRange, drawSpeed, minChargeTicks, System.currentTimeMillis());
+            this(speed, gravity, drag, isHoming, maxRange, drawSpeed, minChargeTicks, System.currentTimeMillis());
         }
 
-        public BallisticsProfile(float speed, double gravity, double drag, double waterDrag, boolean isHoming, double maxRange, float drawSpeed, int minChargeTicks) {
-            this(speed, gravity, drag, waterDrag, isHoming, maxRange, drawSpeed, minChargeTicks, System.currentTimeMillis());
-        }
-
-        public BallisticsProfile(float speed, double gravity, double drag, double waterDrag, boolean isHoming, double maxRange, float drawSpeed, int minChargeTicks, long lastUpdated) {
+        public BallisticsProfile(float speed, double gravity, double drag, boolean isHoming, double maxRange, float drawSpeed, int minChargeTicks, long lastUpdated) {
             this.speed = speed;
             this.gravity = gravity;
             this.drag = drag;
-            this.waterDrag = waterDrag;
             this.isHoming = isHoming;
             this.maxRange = maxRange;
             this.drawSpeed = drawSpeed;
@@ -108,9 +102,9 @@ public final class AutoBallisticsTracker {
     private static final Map<String, BallisticsProfile> DEFAULT_FACTORY_PRESETS = new LinkedHashMap<>();
     static {
         // 1. 原版原装经典远程武器
-        DEFAULT_FACTORY_PRESETS.put("minecraft:bow", new BallisticsProfile(3.0f, 0.05, 0.99, 0.60, false, 120.0, 1.0f, 20));
-        DEFAULT_FACTORY_PRESETS.put("minecraft:crossbow", new BallisticsProfile(3.15f, 0.05, 0.99, 0.60, false, 120.0, 1.0f, 25));
-        DEFAULT_FACTORY_PRESETS.put("minecraft:trident", new BallisticsProfile(2.5f, 0.05, 0.99, 0.99, false, 80.0, 1.0f, 10));
+        DEFAULT_FACTORY_PRESETS.put("minecraft:bow", new BallisticsProfile(3.0f, 0.05, 0.99, false, 120.0, 1.0f, 20));
+        DEFAULT_FACTORY_PRESETS.put("minecraft:crossbow", new BallisticsProfile(3.15f, 0.05, 0.99, false, 120.0, 1.0f, 25));
+        DEFAULT_FACTORY_PRESETS.put("minecraft:trident", new BallisticsProfile(2.5f, 0.05, 0.99, false, 80.0, 1.0f, 10));
 
         // 2. 植物魔法与额外植物学系列 (零重力直瞄与特色射速)
         DEFAULT_FACTORY_PRESETS.put("extrabotany:failnaught", new BallisticsProfile(7.0f, 0.0, 0.99, false, 180.0, 3.6f, 20));
@@ -327,8 +321,8 @@ public final class AutoBallisticsTracker {
         if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(bowStack)) {
             com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus gun = 
                 com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(bowStack);
-            // 现代枪械采用高平直射直瞄物理 (0.0 重力，180米无下坠直瞄，水阻 0.99D)
-            return new BallisticsProfile(gun.bulletSpeed, 0.0, 0.99, 0.99, false, 180.0, 1.0f, 1);
+            // 现代枪械采用高平直射直瞄物理 (0.0 重力，180米无下坠直瞄)
+            return new BallisticsProfile(gun.bulletSpeed, 0.0, 0.99, false, 180.0, 1.0f, 1);
         }
 
         Item item = bowStack.getItem();
@@ -361,8 +355,7 @@ public final class AutoBallisticsTracker {
             ? ext.drawTicks
             : Math.max(1, (int) Math.ceil(20.0 / drawSpeed));
 
-        double waterDrag = bowStack.is(net.minecraft.world.item.Items.TRIDENT) ? 0.99D : 0.60D;
-        return new BallisticsProfile(finalSpeed, baseGravity, 0.99, waterDrag, isHoming, baseRange, drawSpeed, minChargeTicks);
+        return new BallisticsProfile(finalSpeed, baseGravity, 0.99, isHoming, baseRange, drawSpeed, minChargeTicks);
     }
 
     /**
@@ -677,7 +670,6 @@ public final class AutoBallisticsTracker {
             AutoAttackerConfig.AIM_PREDICT_ARROW_SPEED.get().floatValue(),
             AutoAttackerConfig.AIM_PREDICT_GRAVITY.get(),
             0.99,
-            0.60,
             false,
             AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get(),
             1.0f,
@@ -705,113 +697,64 @@ public final class AutoBallisticsTracker {
 
     /**
      * 前向微元物理模拟：模拟箭矢沿指定仰角发射，在达到目标水平距离时的真实高度落点
-     * 遵循原版物理与多介质水阻（空气 0.99，水阻 0.60），采用与渲染引擎完全同构的 Substep 微元积分
+     * 遵循原版纯净空气动力学物理（空气阻力保留率 drag，标准重力 gravity）
      */
-    private static SimResult simulateTrajectory(Level level, Vec3 eye, double dirX, double dirZ, double targetDist, double targetDy, double speed, double gravity, double drag, double waterDrag, double elevAngleRad) {
-        double vHoriz = speed * Math.cos(elevAngleRad);
+    private static SimResult simulateTrajectory(double targetDist, double targetDy, double speed, double gravity, double drag, double elevAngleRad) {
+        double vx = speed * Math.cos(elevAngleRad);
         double vy = speed * Math.sin(elevAngleRad);
         double x = 0.0;
         double y = 0.0;
 
-        int maxSteps = (int) (300.0 / SUBSTEP);
+        int maxSteps = 300;
         double minY = Math.min(-100.0, targetDy - 50.0);
 
-        int lastBx = (eye != null) ? Mth.floor(eye.x) : Integer.MIN_VALUE;
-        int lastBy = (eye != null) ? Mth.floor(eye.y) : Integer.MIN_VALUE;
-        int lastBz = (eye != null) ? Mth.floor(eye.z) : Integer.MIN_VALUE;
-        BlockPos.MutableBlockPos mutPos = new BlockPos.MutableBlockPos(lastBx, lastBy, lastBz);
-        boolean lastIsWater = (level != null && eye != null) && level.isWaterAt(mutPos);
-
         for (int step = 0; step < maxSteps; step++) {
-            double dt = SUBSTEP;
-            double dx = vHoriz * dt;
-            double dy = vy * dt;
-            double nextX = x + dx;
-            double nextY = y + dy;
+            double nextX = x + vx;
+            double nextY = y + vy;
 
             if (nextX >= targetDist) {
-                double frac = (targetDist - x) / Math.max(dx, 1.0E-6);
+                double frac = (targetDist - x) / Math.max(vx, 1.0E-6);
                 frac = Mth.clamp(frac, 0.0, 1.0);
-                double hitY = y + dy * frac;
-                double hitT = (step + frac) * dt;
+                double hitY = y + vy * frac;
+                double hitT = step + frac;
                 return new SimResult(hitY, hitT, true);
             }
 
             x = nextX;
             y = nextY;
-
-            if (level != null && eye != null) {
-                double wx = eye.x + x * dirX;
-                double wy = eye.y + y;
-                double wz = eye.z + x * dirZ;
-                int bx = Mth.floor(wx);
-                int by = Mth.floor(wy);
-                int bz = Mth.floor(wz);
-
-                if (bx != lastBx || by != lastBy || bz != lastBz) {
-                    lastBx = bx;
-                    lastBy = by;
-                    lastBz = bz;
-                    mutPos.set(bx, by, bz);
-                    lastIsWater = level.isWaterAt(mutPos);
-                }
-            }
-
-            double currentDrag = lastIsWater ? waterDrag : drag;
-            double substepDrag = Math.pow(currentDrag, dt);
-            vHoriz *= substepDrag;
-            vy = vy * substepDrag - gravity * dt;
+            vx *= drag;
+            vy = (vy - gravity) * drag;
 
             if (y < minY && vy < 0.0) break;
         }
         return new SimResult(y, 300.0, false);
     }
 
-    private static SimResult simulateTrajectory(double targetDist, double targetDy, double speed, double gravity, double drag, double waterDrag, double elevAngleRad) {
-        return simulateTrajectory(null, Vec3.ZERO, 1.0, 0.0, targetDist, targetDy, speed, gravity, drag, waterDrag, elevAngleRad);
-    }
-
     public static TrajectorySolution solveTrajectory(Vec3 eye, Vec3 targetAimPoint, double speed, double gravity) {
-        return solveTrajectory(null, eye, targetAimPoint, speed, gravity, 0.99D, 0.60D);
-    }
-
-    public static TrajectorySolution solveTrajectory(Level level, Vec3 eye, Vec3 targetAimPoint, double speed, double gravity) {
-        return solveTrajectory(level, eye, targetAimPoint, speed, gravity, 0.99D, 0.60D);
+        return solveTrajectory(eye, targetAimPoint, speed, gravity, 0.99D);
     }
 
     /**
-     * 二分求解发射仰角：在 8~24 步内收敛到误差 < 0.01 格的绝对精准仰角，支持多介质水阻跨越仿真
-     * @param level 世界实例 (用于水体判定)
+     * 二分求解发射仰角：在 8~20 步内收敛到误差 < 0.01 格的绝对精准仰角
      * @param eye 玩家眼睛位置
      * @param targetAimPoint 目标期望击中点 (如胸口中上部)
      * @param speed 初速度
      * @param gravity 重力
      * @param drag 空气阻力/速度保留率
-     * @param waterDrag 水中阻力/速度保留率
      * @return TrajectorySolution 包含精确 pitch 和预计飞行时间
      */
-    public static TrajectorySolution solveTrajectory(Level level, Vec3 eye, Vec3 targetAimPoint, double speed, double gravity, double drag, double waterDrag) {
+    public static TrajectorySolution solveTrajectory(Vec3 eye, Vec3 targetAimPoint, double speed, double gravity, double drag) {
         double dx = targetAimPoint.x - eye.x;
         double dz = targetAimPoint.z - eye.z;
         double horizDist = Math.sqrt(dx * dx + dz * dz);
         double targetDy = targetAimPoint.y - eye.y;
         double totalDist = eye.distanceTo(targetAimPoint);
 
-        if (horizDist < 0.15) {
+        if (horizDist < 0.15 || gravity <= 1.0E-6D) {
             float directPitch = (float) -(Mth.atan2(targetDy, Math.max(0.001, horizDist)) * (180D / Math.PI));
             double flightTime = totalDist / Math.max(speed, 0.25);
             return new TrajectorySolution(directPitch, flightTime, true);
         }
-
-        // 零重力武器 (如百中弓、水晶弓)：纯几何直线
-        if (gravity <= 1.0E-6D) {
-            float directPitch = (float) -(Mth.atan2(targetDy, Math.max(0.001, horizDist)) * (180D / Math.PI));
-            double flightTime = totalDist / Math.max(speed, 0.25);
-            return new TrajectorySolution(directPitch, flightTime, true);
-        }
-
-        double dirX = dx / horizDist;
-        double dirZ = dz / horizDist;
 
         // MC 物理二分迭代搜索最优发射仰角 (elevAngle: 向上为正弧度)
         double directAngle = Math.atan2(targetDy, horizDist);
@@ -828,12 +771,11 @@ public final class AutoBallisticsTracker {
         boolean bestReached = false;
         double bestDiff = Double.MAX_VALUE;
 
-        for (int iter = 0; iter < 24; iter++) {
+        for (int iter = 0; iter < 20; iter++) {
             double mid = (low + high) * 0.5;
-            SimResult res = simulateTrajectory(level, eye, dirX, dirZ, horizDist, targetDy, speed, gravity, drag, waterDrag, mid);
+            SimResult res = simulateTrajectory(horizDist, targetDy, speed, gravity, drag, mid);
 
             if (!res.reached) {
-                // 水体或远距离未命中：若仰角未达到高位 (70°)，说明发射角过平导致在水中阻力耗尽或抛物线提前落地，必须抬高下界
                 if (mid < Math.toRadians(70.0)) {
                     low = mid;
                 } else {
@@ -965,7 +907,7 @@ public final class AutoBallisticsTracker {
     }
 
     private static BallisticsProfile cloneProfile(BallisticsProfile p) {
-        return new BallisticsProfile(p.speed, p.gravity, p.drag, p.waterDrag > 0 ? p.waterDrag : 0.60D, p.isHoming, p.maxRange, p.drawSpeed, p.minChargeTicks, p.lastUpdated);
+        return new BallisticsProfile(p.speed, p.gravity, p.drag, p.isHoming, p.maxRange, p.drawSpeed, p.minChargeTicks, p.lastUpdated);
     }
 
     private static BallisticsProfile cloneAndAdapt(BallisticsProfile base, ItemStack bowStack) {
@@ -977,7 +919,7 @@ public final class AutoBallisticsTracker {
         int minTicks = (base.minChargeTicks > 0)
                 ? Math.max(1, (int) Math.ceil((double) base.minChargeTicks / Math.max(0.1, drawSpeed)))
                 : Math.max(1, (int) Math.ceil(20.0 / Math.max(0.1, finalDrawSpeed)));
-        return new BallisticsProfile(finalSpeed, base.gravity, base.drag, base.waterDrag > 0 ? base.waterDrag : 0.60D, base.isHoming, base.maxRange, finalDrawSpeed, minTicks, System.currentTimeMillis());
+        return new BallisticsProfile(finalSpeed, base.gravity, base.drag, base.isHoming, base.maxRange, finalDrawSpeed, minTicks, System.currentTimeMillis());
     }
 
     private static synchronized void loadFromDisk() {
