@@ -815,8 +815,19 @@ public final class TrajectoryRenderer {
     // =========================================================================
 
     public static ProjectedPoint projectToScreen(Camera camera, Vec3 point, Minecraft mc) {
-        Vec3 delta = point.subtract(camera.getPosition());
-        Vec3 forward = Vec3.directionFromRotation(camera.getXRot(), camera.getYRot()).normalize();
+        Vec3 camPos = camera.getPosition();
+        float xRot = camera.getXRot();
+        float yRot = camera.getYRot();
+        if (com.xdyyj.autoattacker.compat.ShoulderSurfingCompat.isShoulderSurfing()) {
+            Vec3 ssPos = com.xdyyj.autoattacker.compat.ShoulderSurfingCompat.getCameraPosition();
+            if (ssPos != null) {
+                camPos = ssPos;
+            }
+            xRot = com.xdyyj.autoattacker.compat.ShoulderSurfingCompat.getCameraPitch();
+            yRot = com.xdyyj.autoattacker.compat.ShoulderSurfingCompat.getCameraYaw();
+        }
+        Vec3 delta = point.subtract(camPos);
+        Vec3 forward = Vec3.directionFromRotation(xRot, yRot).normalize();
         Vec3 worldUp = new Vec3(0.0D, 1.0D, 0.0D);
         Vec3 right = forward.cross(worldUp);
         if (right.lengthSqr() < 1.0E-8D) {

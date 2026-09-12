@@ -105,6 +105,8 @@ public class ClientEvents {
     private static Vec3 staticSmoothedTargetVelocity = Vec3.ZERO;
     private static PredictedAim staticLastPredictedAim = null;
     private static float staticLastPredictedYaw = 0.0f;
+    private static float staticLastPredictedCamYaw = 0.0f;
+    private static float staticLastPredictedCamPitch = 0.0f;
 
     public static LivingEntity getCurrentTarget() {
         if (staticCurrentTarget != null && staticCurrentTarget.isAlive() && !staticCurrentTarget.isRemoved()) {
@@ -123,6 +125,14 @@ public class ClientEvents {
 
     public static float getLastPredictedYaw() {
         return staticLastPredictedYaw;
+    }
+
+    public static float getLastPredictedCamYaw() {
+        return staticLastPredictedCamYaw;
+    }
+
+    public static float getLastPredictedCamPitch() {
+        return staticLastPredictedCamPitch;
     }
 
     public static int getDebugToggleKeyCode() {
@@ -392,8 +402,8 @@ public class ClientEvents {
                         boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
                         float currentYaw = isShoulder ? ShoulderSurfingCompat.getCameraYaw() : player.getYRot();
                         float currentPitch = isShoulder ? ShoulderSurfingCompat.getCameraPitch() : player.getXRot();
-                        float targetAimYaw = (staticLastPredictedAim != null) ? staticLastPredictedAim.targetYaw : staticLastPredictedYaw;
-                        float targetAimPitch = (staticLastPredictedAim != null) ? staticLastPredictedAim.targetPitch : currentPitch;
+                        float targetAimYaw = isShoulder ? staticLastPredictedCamYaw : ((staticLastPredictedAim != null) ? staticLastPredictedAim.targetYaw : staticLastPredictedYaw);
+                        float targetAimPitch = isShoulder ? staticLastPredictedCamPitch : ((staticLastPredictedAim != null) ? staticLastPredictedAim.targetPitch : currentPitch);
                         float yawDiff = Math.abs(Mth.wrapDegrees(targetAimYaw - currentYaw));
                         float pitchDiff = Math.abs(targetAimPitch - currentPitch);
                         
@@ -830,6 +840,11 @@ public class ClientEvents {
                 destCamYaw = camDirectYaw;
                 destCamPitch = camDirectPitch;
             }
+            staticLastPredictedCamYaw = destCamYaw;
+            staticLastPredictedCamPitch = destCamPitch;
+        } else {
+            staticLastPredictedCamYaw = destYaw;
+            staticLastPredictedCamPitch = destPitch;
         }
 
         float targetTrackYaw = isShoulder ? destCamYaw : destYaw;

@@ -42,6 +42,9 @@ public final class FirearmAdapter {
 
     public static final TagKey<Item> FORGE_GUNS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:guns"));
     public static final TagKey<Item> C_GUNS_TAG = ItemTags.create(ResourceLocation.tryParse("c:guns"));
+    public static final TagKey<Item> FORGE_AMMO_TAG = ItemTags.create(ResourceLocation.tryParse("forge:ammo"));
+    public static final TagKey<Item> C_AMMO_TAG = ItemTags.create(ResourceLocation.tryParse("c:ammo"));
+    public static final TagKey<Item> FORGE_BULLETS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:bullets"));
 
     private static final Map<Item, Boolean> IS_GUN_CACHE = new ConcurrentHashMap<>();
     private static final Map<Item, GunMeta> GUN_META_CACHE = new ConcurrentHashMap<>();
@@ -215,6 +218,19 @@ public final class FirearmAdapter {
     private static boolean cgmChecked = false;
     private static boolean cgmAvailable = false;
     private static Class<?> cgmGunItemClass = null;
+    private static Class<?> cgmGunClass = null;
+    private static Method cgmGetModifiedGunMethod = null;
+    private static Method cgmFindAmmoStackMethod = null;
+    private static Method cgmGetProjectileMethod = null;
+    private static Method cgmGetGeneralMethod = null;
+    private static Method cgmProjGetItemMethod = null;
+    private static Method cgmProjGetSpeedMethod = null;
+    private static Method cgmProjIsGravityMethod = null;
+    private static Method cgmGenIsAutoMethod = null;
+    private static Method cgmGenGetRateMethod = null;
+    private static Method cgmGetReloadsMethod = null;
+    private static Method cgmReloadsGetMaxAmmoMethod = null;
+    private static Field cgmKeyReloadField = null;
     private static Class<?> cgmReloadHandlerClass = null;
     private static Method cgmGetReloadHandlerMethod = null;
     private static Method cgmSetReloadingMethod = null;
@@ -335,7 +351,7 @@ public final class FirearmAdapter {
             return true;
         }
         ResourceLocation reg = ForgeRegistries.ITEMS.getKey(stack.getItem());
-        return reg != null && reg.getNamespace().equalsIgnoreCase("jeg");
+        return reg != null && (reg.getNamespace().equalsIgnoreCase("jeg") || reg.getNamespace().equalsIgnoreCase("mteg"));
     }
 
     public static boolean isScorchedGun(ItemStack stack) {
@@ -355,36 +371,52 @@ public final class FirearmAdapter {
             return true;
         }
         ResourceLocation reg = ForgeRegistries.ITEMS.getKey(stack.getItem());
-        return reg != null && reg.getNamespace().equalsIgnoreCase("cgm");
+        if (reg != null) {
+            String ns = reg.getNamespace().toLowerCase(Locale.ROOT);
+            return ns.equals("cgm") || ns.equals("superb_warfare") || ns.equals("additional_guns") ||
+                   ns.equals("apex_guns") || ns.equals("aurorasguns") || ns.equals("nam");
+        }
+        return false;
     }
 
     private static boolean detectIsGun(ItemStack stack, Item item) {
+        // 0. Forge / Common 规范枪械 Tag 探测
+        if (stack.is(FORGE_GUNS_TAG) || stack.is(C_GUNS_TAG)) {
+            return true;
+        }
+
         // 1. TACZ 优先探测
         if (isTaczGun(stack)) return true;
 
-        // 2. 命名空间探测
+        // 2. 模组专属与知名枪械命名空间探测
         ResourceLocation reg = ForgeRegistries.ITEMS.getKey(item);
         if (reg != null) {
             String ns = reg.getNamespace().toLowerCase(Locale.ROOT);
-            if (ns.equals("tacz") || ns.equals("pointblank") || ns.equals("jeg") ||
+            if (ns.equals("tacz") || ns.equals("pointblank") || ns.equals("jeg") || ns.equals("mteg") ||
                 ns.equals("scguns") || ns.equals("scorchedguns") || ns.equals("cgm") ||
-                ns.equals("superb_warfare") || ns.equals("vic") || ns.equals("mwc") ||
+                ns.equals("superb_warfare") || ns.equals("additional_guns") || ns.equals("apex_guns") ||
+                ns.equals("aurorasguns") || ns.equals("nam") || ns.equals("createarmory") ||
+                ns.equals("gunswithoutroses") || ns.equals("gwr") || ns.equals("musketmod") ||
+                ns.equals("musket") || ns.equals("craftingdead") || ns.equals("flansmod") ||
+                ns.equals("vic") || ns.equals("mwc") ||
                 ns.contains("gun") || ns.contains("weapon")) {
                 String path = reg.getPath().toLowerCase(Locale.ROOT);
                 if (!path.contains("ammo") && !path.contains("bullet") &&
                     !path.contains("magazine") && !path.contains("attachment") &&
                     !path.contains("casing") && !path.contains("workbench") &&
-                    !path.contains("blueprint")) {
+                    !path.contains("blueprint") && !path.contains("part") &&
+                    !path.contains("barrel") && !path.contains("stock")) {
                     return true;
                 }
             }
         }
 
-        // 3. 检查类继承与类名
+        // 3. 检查类继承与类名启发式
         Class<?> clazz = item.getClass();
         while (clazz != null && clazz != Object.class) {
             String className = clazz.getName().toLowerCase(Locale.ROOT);
-            if (className.contains("gunitem") || className.contains("firearm") || className.contains("rifle")) {
+            if (className.contains("gunitem") || className.contains("firearm") ||
+                className.contains("rifle") || className.contains("musket") || className.contains("pistol")) {
                 if (!className.contains("ammo") && !className.contains("bullet") && !className.contains("attachment")) {
                     return true;
                 }
@@ -660,7 +692,71 @@ public final class FirearmAdapter {
                     bulletSpeed, bulletSpeed * 20.0f, bulletGravity, headshotMult, Math.max(rpm, 120), ammoId, fireMode, false);
         }
 
-        // --- 5. 通用枪械启发式退避 ---
+        // --- 5. CGM / Superb Warfare 等衍生模组状态提取 ---
+        if (isCgmGun(stack)) {
+            initCgmReflection();
+            CompoundTag tag = stack.getTag();
+            int curAmmo = (tag != null && tag.contains("AmmoCount")) ? tag.getInt("AmmoCount") : -1;
+            int maxAmmo = -1;
+            int rpm = 600;
+            String fireMode = "AUTO";
+            float bulletSpeed = -1.0f;
+            double bulletGravity = -1.0;
+            float headshotMult = 1.5f;
+            String ammoId = "";
+
+            if (cgmGetModifiedGunMethod != null && cgmGunItemClass != null && cgmGunItemClass.isInstance(stack.getItem())) {
+                Object gun = safeInvoke(cgmGetModifiedGunMethod, stack.getItem(), stack);
+                if (gun != null) {
+                    if (cgmGetGeneralMethod != null) {
+                        Object general = safeInvoke(cgmGetGeneralMethod, gun);
+                        if (general != null) {
+                            if (cgmGenGetRateMethod != null) {
+                                int rateTicks = safeInvokeOrDefault(cgmGenGetRateMethod, general, 0);
+                                if (rateTicks > 0) rpm = Math.round(1200.0f / rateTicks);
+                            }
+                            if (cgmGenIsAutoMethod != null) {
+                                boolean isAuto = safeInvokeOrDefault(cgmGenIsAutoMethod, general, true);
+                                fireMode = isAuto ? "AUTO" : "SEMI";
+                            }
+                        }
+                    }
+                    if (cgmGetProjectileMethod != null) {
+                        Object proj = safeInvoke(cgmGetProjectileMethod, gun);
+                        if (proj != null) {
+                            if (cgmProjGetSpeedMethod != null) {
+                                Number speedNum = safeInvoke(cgmProjGetSpeedMethod, proj);
+                                if (speedNum != null) bulletSpeed = speedNum.floatValue();
+                            }
+                            if (cgmProjIsGravityMethod != null) {
+                                boolean hasGrav = safeInvokeOrDefault(cgmProjIsGravityMethod, proj, false);
+                                bulletGravity = hasGrav ? 0.015 : 0.003;
+                            }
+                            if (cgmProjGetItemMethod != null) {
+                                Object ammoObj = safeInvoke(cgmProjGetItemMethod, proj);
+                                if (ammoObj != null) ammoId = ammoObj.toString();
+                            }
+                        }
+                    }
+                    if (cgmGetReloadsMethod != null && cgmReloadsGetMaxAmmoMethod != null) {
+                        Object reloads = safeInvoke(cgmGetReloadsMethod, gun);
+                        if (reloads != null) {
+                            maxAmmo = safeInvokeOrDefault(cgmReloadsGetMaxAmmoMethod, reloads, -1);
+                        }
+                    }
+                }
+            }
+
+            Item item = stack.getItem();
+            GunMeta meta = GUN_META_CACHE.computeIfAbsent(item, FirearmAdapter::resolveGunMeta);
+            if (bulletSpeed <= 0) bulletSpeed = meta.baseSpeed;
+            if (bulletGravity < 0) bulletGravity = meta.baseGravity;
+            if (maxAmmo <= 0) maxAmmo = 1;
+            return new GunStatus(true, meta.typeName, curAmmo, maxAmmo,
+                    bulletSpeed, bulletSpeed * 20.0f, bulletGravity, headshotMult, Math.max(rpm, 120), ammoId, fireMode, false);
+        }
+
+        // --- 6. 通用枪械启发式退避 ---
         Item item = stack.getItem();
         GunMeta meta = GUN_META_CACHE.computeIfAbsent(item, FirearmAdapter::resolveGunMeta);
 
@@ -1081,7 +1177,7 @@ public final class FirearmAdapter {
                     if (itemRes != null) {
                         if (reloadItem != null && reloadItem.equals(itemRes)) return true;
                         if (projItem != null && projItem.equals(itemRes)) return true;
-                        if (itemRes.getNamespace().equalsIgnoreCase("jeg")) {
+                        if (itemRes.getNamespace().equalsIgnoreCase("jeg") || itemRes.getNamespace().equalsIgnoreCase("mteg")) {
                             String p = itemRes.getPath();
                             if (p.contains("ammo") || p.contains("bullet") || p.contains("shell") || p.contains("round") || p.contains("cartridge") || p.contains("arrow")) {
                                 return true;
@@ -1093,7 +1189,70 @@ public final class FirearmAdapter {
             return false;
         }
 
-        // 5. CGM / 通用枪械退避方案：优先根据 ammoId 匹配，再扫描背包
+        // 5. CGM / Superb Warfare 等衍生模组备弹检测
+        if (isCgmGun(stack)) {
+            initCgmReflection();
+            ResourceLocation projItemRes = null;
+            Item projItem = null;
+            if (cgmGetModifiedGunMethod != null && cgmGunItemClass != null && cgmGunItemClass.isInstance(stack.getItem())) {
+                Object gun = safeInvoke(cgmGetModifiedGunMethod, stack.getItem(), stack);
+                if (gun != null && cgmGetProjectileMethod != null && cgmProjGetItemMethod != null) {
+                    Object proj = safeInvoke(cgmGetProjectileMethod, gun);
+                    if (proj != null) {
+                        Object ammoObj = safeInvoke(cgmProjGetItemMethod, proj);
+                        if (ammoObj instanceof Item it) {
+                            projItem = it;
+                        } else if (ammoObj instanceof ResourceLocation rl) {
+                            projItemRes = rl;
+                        } else if (ammoObj != null) {
+                            projItemRes = ResourceLocation.tryParse(ammoObj.toString());
+                        }
+                    }
+                }
+                if (gun != null && cgmFindAmmoStackMethod != null) {
+                    if (projItem != null) {
+                        ItemStack[] stacks = safeInvoke(cgmFindAmmoStackMethod, null, player, projItem);
+                        if (stacks != null && stacks.length > 0) return true;
+                    } else if (projItemRes != null) {
+                        Item it = ForgeRegistries.ITEMS.getValue(projItemRes);
+                        if (it != null) {
+                            ItemStack[] stacks = safeInvoke(cgmFindAmmoStackMethod, null, player, it);
+                            if (stacks != null && stacks.length > 0) return true;
+                        }
+                    }
+                }
+            }
+            // 背包穿透匹配
+            for (ItemStack invStack : player.getInventory().items) {
+                if (!invStack.isEmpty() && invStack.getCount() > 0) {
+                    Item invItem = invStack.getItem();
+                    if (projItem != null && invItem == projItem) return true;
+                    ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invItem);
+                    if (itemRes != null) {
+                        if (projItemRes != null && projItemRes.equals(itemRes)) return true;
+                        String ns = itemRes.getNamespace().toLowerCase(Locale.ROOT);
+                        if (ns.equals("cgm") || ns.equals("superb_warfare") || ns.equals("additional_guns") || ns.equals("apex_guns") || ns.equals("aurorasguns") || ns.equals("nam")) {
+                            String p = itemRes.getPath();
+                            if (p.contains("ammo") || p.contains("bullet") || p.contains("round") || p.contains("shell") || p.contains("dart") || p.contains("grenade") || p.contains("missile")) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        // 6. 通用 Forge / Common Ammo Tag 检测
+        for (ItemStack invStack : player.getInventory().items) {
+            if (!invStack.isEmpty() && invStack.getCount() > 0) {
+                if (invStack.is(FORGE_AMMO_TAG) || invStack.is(C_AMMO_TAG) || invStack.is(FORGE_BULLETS_TAG)) {
+                    return true;
+                }
+            }
+        }
+
+        // 7. 通用枪械退避方案：优先根据 ammoId 匹配，再扫描同命名空间与常见弹药关键词
         CompoundTag tag = stack.getTag();
         if (tag != null) {
             String ammoIdStr = tag.contains("AmmoId") ? tag.getString("AmmoId") : (tag.contains("ammoId") ? tag.getString("ammoId") : null);
@@ -1115,12 +1274,15 @@ public final class FirearmAdapter {
         ResourceLocation gunReg = ForgeRegistries.ITEMS.getKey(stack.getItem());
         String gunNs = gunReg != null ? gunReg.getNamespace().toLowerCase(Locale.ROOT) : "";
         for (ItemStack invStack : player.getInventory().items) {
-            if (!invStack.isEmpty()) {
+            if (!invStack.isEmpty() && invStack.getCount() > 0) {
                 ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
                 if (itemRes != null) {
                     String itemNs = itemRes.getNamespace().toLowerCase(Locale.ROOT);
                     String itemPath = itemRes.getPath().toLowerCase(Locale.ROOT);
-                    if ((itemNs.equals(gunNs) || itemNs.equals("minecraft")) && (itemPath.contains("ammo") || itemPath.contains("bullet") || itemPath.contains("magazine") || itemPath.contains("round") || itemPath.contains("powder") || itemPath.contains("arrow"))) {
+                    if ((itemNs.equals(gunNs) || itemNs.equals("minecraft") || itemNs.contains("ammo") || itemNs.contains("bullet")) &&
+                        (itemPath.contains("ammo") || itemPath.contains("bullet") || itemPath.contains("magazine") ||
+                         itemPath.contains("round") || itemPath.contains("powder") || itemPath.contains("arrow") ||
+                         itemPath.contains("cartridge") || itemPath.contains("shot") || itemPath.contains("ball"))) {
                         return true;
                     }
                 }
@@ -1268,9 +1430,15 @@ public final class FirearmAdapter {
             return true;
         }
 
-        // 5. CGM 枪械
+        // 5. CGM / Superb Warfare 等衍生模组枪械
         if (isCgmGun(mainHand)) {
             initCgmReflection();
+            if (cgmKeyReloadField != null) {
+                KeyMapping reloadKey = safeGetFieldValue(cgmKeyReloadField, null);
+                if (reloadKey != null) {
+                    KeyMapping.click(reloadKey.getKey());
+                }
+            }
             if (cgmReloadHandlerClass != null && cgmGetReloadHandlerMethod != null && cgmSetReloadingMethod != null) {
                 Object handler = safeInvoke(cgmGetReloadHandlerMethod, null);
                 if (handler != null) {
@@ -1278,6 +1446,7 @@ public final class FirearmAdapter {
                     return true;
                 }
             }
+            return true;
         }
 
         return false;
@@ -1973,6 +2142,44 @@ public final class FirearmAdapter {
         cgmChecked = true;
         runSilently(() -> {
             cgmGunItemClass = safeGetClass("com.mrcrayfish.guns.item.GunItem");
+            cgmGunClass = safeGetClass("com.mrcrayfish.guns.common.Gun");
+
+            if (cgmGunItemClass != null) {
+                cgmGetModifiedGunMethod = safeGetMethod(cgmGunItemClass, "getModifiedGun", ItemStack.class);
+            }
+
+            if (cgmGunClass != null) {
+                cgmFindAmmoStackMethod = safeGetMethod(cgmGunClass, "findAmmoStack", Player.class, Item.class);
+                cgmGetProjectileMethod = safeGetMethod(cgmGunClass, "getProjectile");
+                cgmGetGeneralMethod = safeGetMethod(cgmGunClass, "getGeneral");
+                cgmGetReloadsMethod = safeGetMethod(cgmGunClass, "getReloads");
+
+                Class<?> projClass = safeGetClass("com.mrcrayfish.guns.common.Gun$Projectile");
+                if (projClass != null) {
+                    cgmProjGetItemMethod = safeGetMethod(projClass, "getItem");
+                    cgmProjGetSpeedMethod = safeGetMethod(projClass, "getSpeed");
+                    cgmProjIsGravityMethod = safeGetMethod(projClass, "isGravity");
+                }
+
+                Class<?> genClass = safeGetClass("com.mrcrayfish.guns.common.Gun$General");
+                if (genClass != null) {
+                    cgmGenIsAutoMethod = safeGetMethod(genClass, "isAuto");
+                    if (cgmGenIsAutoMethod == null) {
+                        cgmGenIsAutoMethod = safeGetMethod(genClass, "getAuto");
+                    }
+                    cgmGenGetRateMethod = safeGetMethod(genClass, "getRate");
+                }
+
+                Class<?> reloadsClass = safeGetClass("com.mrcrayfish.guns.common.Gun$Reloads");
+                if (reloadsClass != null) {
+                    cgmReloadsGetMaxAmmoMethod = safeGetMethod(reloadsClass, "getMaxAmmo");
+                }
+            }
+
+            Class<?> kbClass = safeGetClass("com.mrcrayfish.guns.client.KeyBinds");
+            if (kbClass != null) {
+                cgmKeyReloadField = safeGetField(kbClass, "KEY_RELOAD");
+            }
 
             cgmReloadHandlerClass = safeGetClass("com.mrcrayfish.guns.client.handler.ReloadHandler");
             if (cgmReloadHandlerClass != null) {
@@ -1987,7 +2194,7 @@ public final class FirearmAdapter {
                 cgmIsAimingMethod = safeGetMethod(cgmAimingHandlerClass, "isAiming");
             }
 
-            if (cgmGunItemClass != null) {
+            if (cgmGunItemClass != null || cgmGunClass != null) {
                 cgmAvailable = true;
             }
         });
