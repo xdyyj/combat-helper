@@ -1,4 +1,4 @@
-# Eclipse
+﻿# Eclipse
 bin/
 *.launch
 .settings/
@@ -30,7 +30,6 @@ scratch/
 tmp_test/
 old_mod_backup/
 reference-lib/
-logs/
 *.log
 
 # OS generated
