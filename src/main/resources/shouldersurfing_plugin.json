@@ -1,0 +1,6 @@
+{
+  " entrypoints\: [
+ \com.xdyyj.autoattacker.compat.shouldersurfing.AutoAttackerShoulderSurfingPlugin\
+ ],
+ \entrypoint\: \com.xdyyj.autoattacker.compat.shouldersurfing.AutoAttackerShoulderSurfingPlugin\
+}

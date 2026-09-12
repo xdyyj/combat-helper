@@ -118,6 +118,24 @@ public class ClientEvents {
         return null;
     }
 
+    public static boolean hasLockedTarget() {
+        return getCurrentTarget() != null;
+    }
+
+    public static boolean isForcingCameraCoupling() {
+        if (hasLockedTarget()) {
+            return true;
+        }
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player != null) {
+            ItemStack held = mc.player.getMainHandItem();
+            if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(held) && com.xdyyj.autoattacker.weapon.FirearmAdapter.isAiming(mc.player)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static double getSmoothedTargetSpeed() {
         return staticSmoothedTargetVelocity != null ? staticSmoothedTargetVelocity.length() : 0.0;
     }
@@ -464,14 +482,6 @@ public class ClientEvents {
                                 } else {
                                     // 阶段 2：弓弦已 100% 彻底拉满！进入瞄准就绪释放判定
                                     if (onTarget) {
-                                        if (isShoulder) {
-                                            player.setYRot(staticLastPredictedYaw);
-                                            player.setXRot(staticLastPredictedPitch);
-                                            player.yRotO = staticLastPredictedYaw;
-                                            player.xRotO = staticLastPredictedPitch;
-                                            player.yHeadRot = staticLastPredictedYaw;
-                                            player.yHeadRotO = staticLastPredictedYaw;
-                                        }
                                         // 准星锁定在目标容差内，瞬间松开左键，满威力击发出箭！
                                         lastGunShootTime = System.currentTimeMillis();
                                         com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
@@ -488,14 +498,6 @@ public class ClientEvents {
                             gunReleaseChargeTicks = 0;
                             gunReleaseCoolTicks = 0;
                             if (onTarget) {
-                                if (isShoulder) {
-                                    player.setYRot(staticLastPredictedYaw);
-                                    player.setXRot(staticLastPredictedPitch);
-                                    player.yRotO = staticLastPredictedYaw;
-                                    player.xRotO = staticLastPredictedPitch;
-                                    player.yHeadRot = staticLastPredictedYaw;
-                                    player.yHeadRotO = staticLastPredictedYaw;
-                                }
                                 lastGunShootTime = System.currentTimeMillis();
                                 if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isSemiAuto(gunStatus)) {
                                     // 半自动武器 (如 Glock, 沙漠之鹰, SPR-15 DMR, 单发步枪/狙击枪):
@@ -714,6 +716,9 @@ public class ClientEvents {
 
     @SubscribeEvent
     public void onRenderTick(TickEvent.RenderTickEvent event) {
+        if (currentTarget != null) {
+            com.xdyyj.autoattacker.weapon.GunRecoilSuppressor.suppressExternalCameraRecoil();
+        }
         if (event.phase != TickEvent.Phase.START) return;
         Minecraft mc = Minecraft.getInstance();
         Player player = mc.player;
