@@ -96,6 +96,16 @@ public class ClientEvents {
     private Vec3 smoothedTargetVelocity = Vec3.ZERO;
     private Vec3 lastMeasuredVelocity = Vec3.ZERO;
 
+    // --- 换武器平滑过渡 (Weapon-Swap Smooth Transit) ---
+    // 锁定状态下切换手持武器时，上游的视线宽容期/目标重算会让目标角在一帧内突变，
+    // 导致镜头硬切跳跃。此机制在输出端做速率限制 (slew-rate limiting)：
+    // 镜头始终朝当前目标推进，只是推进速度受上限约束，与上游逻辑完全解耦。
+    private ItemStack lastSwapWatchItem = ItemStack.EMPTY;
+    private final SwapTransit swapTransit = new SwapTransit();
+    private static final long SWAP_TRANSIT_DURATION_NANOS = 320_000_000L; // 320ms 过渡窗口
+    private static final float SWAP_TRANSIT_RATE_START = 1.2f;            // 过渡起始最大角速度 (度/秒)
+    private static final float SWAP_TRANSIT_RATE_FULL = 6.0f;             // 过渡结束时的最大角速度 (度/秒)
+
     // 速度采样
     private static final int VEL_SAMPLE_CAP = 3;
     private final Vec3[] velSamples = new Vec3[VEL_SAMPLE_CAP];
@@ -706,6 +716,10 @@ public class ClientEvents {
         Player player = mc.player;
         if (player == null || mc.level == null || mc.isPaused()) return;
 
+        // 换武器检测必须最先执行：保证基线始终跟随实际手持物，
+        // 否则早退分支会让 lastSwapWatchItem 陈旧，恢复后误判为"刚换武器"。
+        updateSwapTransit(player, ShoulderSurfingCompat.isShoulderSurfing());
+
         if (ShoulderSurfingCompat.isShoulderSurfing() && ShoulderSurfingCompat.isFreeLooking()) {
             wasLockedLastFrame = false;
             lastTrackedTarget = null;
@@ -1036,6 +1050,12 @@ public class ClientEvents {
         float newCamYaw = curCamYaw + stepCamY;
         float newCamPitch = Mth.clamp(curCamPitch + stepCamX, -89.5F, 89.5F);
 
+        // 换武器平滑过渡：拦截目标角突变，把镜头从上一帧朝向平滑滑向目标朝向
+        // (未锁定或开火时自动让位，不干扰锁定吸附与开枪手感)
+        float[] transit = applySwapTransit(newCamYaw, newCamPitch, isGunFiring, currentTarget != null, deltaSec);
+        newCamYaw = transit[0];
+        newCamPitch = transit[1];
+
         float newPlayerYaw;
         float newPlayerPitch;
 
@@ -1084,6 +1104,108 @@ public class ClientEvents {
 
     private LivingEntity getClosestTargetInFOV(Player player, double range, float maxAngle) {
         return getPrioritizedTarget(player, range, maxAngle, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
+    }
+
+    // =========================================================================
+    // 换武器平滑过渡 (Weapon-Swap Smooth Transit)
+    // =========================================================================
+
+    /** 换武器平滑过渡的运行时状态 (每实例独立) */
+    private final class SwapTransit {
+        boolean active = false;
+        long startNanos = 0L;
+        float curYaw = 0f;    // 当前实际输出的朝向 (逐帧累积, 始终跟随目标)
+        float curPitch = 0f;
+    }
+
+    /**
+     * 每帧检测主手物品是否变化，变化即开启一段过渡窗口。
+     *
+     * 注意：换武器本身会让 currentTarget 短暂失效 (视线/目标重算)，
+     * 因此这里不要求 currentTarget 非空 —— 否则最需要平滑的那一刻反而被跳过。
+     * 真正是否施加限速，由 applySwapTransit 在渲染阶段结合锁定状态决定。
+     *
+     * @param isShoulder 当前是否第三人称越肩
+     */
+    private void updateSwapTransit(Player player, boolean isShoulder) {
+        ItemStack held = player.getMainHandItem();
+
+        // 仅比较物品与 NBT，忽略堆叠数量 (丢弃/拾取同类物品不应触发过渡)
+        boolean changed = !ItemStack.isSameItemSameTags(held, lastSwapWatchItem);
+        if (changed) {
+            lastSwapWatchItem = held.copy();
+        }
+
+        if (!changed) return;
+
+        swapTransit.active = true;
+        swapTransit.startNanos = System.nanoTime();
+        // 起点取"此刻的实际朝向"，保证视觉上从当前位置开始滑动
+        if (isShoulder) {
+            swapTransit.curYaw = ShoulderSurfingCompat.getCameraYaw();
+            swapTransit.curPitch = ShoulderSurfingCompat.getCameraPitch();
+        } else {
+            swapTransit.curYaw = player.getYRot();
+            swapTransit.curPitch = player.getXRot();
+        }
+    }
+
+    /**
+     * 换武器后的镜头限速收敛 (Slew-Rate Limiting)。
+     *
+     * 设计要点：绝不用「固定起点 + 曲线插值」——那会让镜头在过渡窗口内脱离目标移动，
+     * 表现为准星僵在原处不跟随。此处对「本帧目标角」做速率限制：
+     * 每帧都朝当前目标推进，只是推进速度受上限约束，因此目标移动时准星持续跟随。
+     *
+     * 仅当处于锁定状态时才施加；开火时立即让位，绝不干扰开枪吸附。
+     *
+     * @param firingNow 当前是否处于开火状态
+     * @param locked   当前是否有锁定目标
+     * @param deltaSec 本帧时长
+     * @return 经过限速后的角度 [yaw, pitch]
+     */
+    private float[] applySwapTransit(float targetYaw, float targetPitch,
+                                     boolean firingNow, boolean locked, float deltaSec) {
+        if (!swapTransit.active) {
+            return new float[]{targetYaw, targetPitch};
+        }
+
+        // 未锁定 / 开火：立即结束过渡，完全不参与插值
+        if (firingNow || !locked) {
+            swapTransit.active = false;
+            return new float[]{targetYaw, targetPitch};
+        }
+
+        long elapsed = System.nanoTime() - swapTransit.startNanos;
+        if (elapsed >= SWAP_TRANSIT_DURATION_NANOS || elapsed < 0L) {
+            swapTransit.active = false;
+            return new float[]{targetYaw, targetPitch};
+        }
+
+        // 速率上限从 RATE_START 线性放开到 RATE_FULL：
+        // 起步稍缓避免顿挫，但全程保留足够跟随速率，绝不出现准星停摆。
+        float t = (float) elapsed / (float) SWAP_TRANSIT_DURATION_NANOS;
+        float maxRate = SWAP_TRANSIT_RATE_START + (SWAP_TRANSIT_RATE_FULL - SWAP_TRANSIT_RATE_START) * t;
+
+        // 每帧都从"上一帧实际输出朝向"重新对齐，消除与真实相机的漂移
+        // (curYaw/curPitch 即上一帧本方法返回的角度)
+        float deltaYaw = Mth.wrapDegrees(targetYaw - swapTransit.curYaw);
+        float deltaPitch = targetPitch - swapTransit.curPitch;
+
+        float safeDelta = (deltaSec <= 0f || deltaSec > 0.25f) ? (1.0f / 60.0f) : deltaSec;
+        float maxStep = Math.max(0.01f, maxRate * safeDelta);
+
+        // 安全阀：已收敛到位 (偏差小于半个步长) 即提前结束过渡，
+        // 避免与上游平滑步进形成双重限速叠加、导致收敛拖沓。
+        if (Math.abs(deltaYaw) <= maxStep && Math.abs(deltaPitch) <= maxStep) {
+            swapTransit.active = false;
+            return new float[]{targetYaw, targetPitch};
+        }
+
+        swapTransit.curYaw += Mth.clamp(deltaYaw, -maxStep, maxStep);
+        swapTransit.curPitch += Mth.clamp(deltaPitch, -maxStep, maxStep);
+
+        return new float[]{swapTransit.curYaw, swapTransit.curPitch};
     }
 
     /**
