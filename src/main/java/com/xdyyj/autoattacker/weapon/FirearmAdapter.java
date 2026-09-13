@@ -2282,33 +2282,102 @@ public final class FirearmAdapter {
         }
     }
 
+    // ==================================================================================
+    // 反射成员查找 (带按类缓存)
+    //
+    // 三个 safeGet* 原先每次都直接调 Class.forName / clazz.getMethod / clazz.getField：
+    //   - getMethod / getField 要遍历该类的全部方法/字段(含继承链)，比一次 invoke 贵得多
+    //   - Class.forName 对「已加载的类」有 JVM 缓存，但「类不存在」时每次都要构造并抛出异常
+    // 调用点合计 168 处(safeGetClass 49 / safeGetMethod 111 / safeGetField 8)，其中
+    // computeGunStatus 的兜底分支会在初始化失败时每帧执行，故全部加上缓存。
+    //
+    // 缓存键：safeGetMethod 含完整参数类型列表(而非仅参数个数，否则同名同参数个数但类型
+    // 不同的重载会静默返回错误的 Method)；safeGetClass 用类名；safeGetField 用字段名。
+    // 用 ClassValue 承载按类缓存：无需哈希查找，且不会像 Map<Class,..> 那样阻止类卸载。
+    //
+    // ConcurrentHashMap 不接受 null 值，故用 MissingMarker.INSTANCE 承载「已查询过且确认
+    // 不存在」的否定结果 —— 其身份与任何真实 Method/Field/Class 都不同，不会撞车。
+    // ==================================================================================
+
+    /** 表示「已查询过且确认不存在」，用于在 ConcurrentHashMap 中缓存否定结果。 */
+    private static final class MissingMarker {
+        static final MissingMarker INSTANCE = new MissingMarker();
+
+        private MissingMarker() {
+        }
+
+        @Override
+        public String toString() {
+            return "<missing>";
+        }
+    }
+
+    /** 按类名缓存的 Class 查找结果 (见 safeGetClass)。 */
+    private static final Map<String, Object> CLASS_CACHE = new ConcurrentHashMap<>();
+
+    /** 按类缓存的 Method 查找结果。 */
+    private static final ClassValue<Map<String, Object>> METHOD_CACHE = new ClassValue<>() {
+        @Override
+        protected Map<String, Object> computeValue(Class<?> type) {
+            return new ConcurrentHashMap<>();
+        }
+    };
+
+    /** 按类缓存的 Field 查找结果。 */
+    private static final ClassValue<Map<String, Object>> FIELD_CACHE = new ClassValue<>() {
+        @Override
+        protected Map<String, Object> computeValue(Class<?> type) {
+            return new ConcurrentHashMap<>();
+        }
+    };
+
     public static Class<?> safeGetClass(String className) {
+        Object cached = CLASS_CACHE.get(className);
+        if (cached != null) return cached == MissingMarker.INSTANCE ? null : (Class<?>) cached;
+        Class<?> result = null;
         try {
-            return Class.forName(className);
+            result = Class.forName(className);
         } catch (Throwable t) {
             LOGGER.trace("Failed to load class {}: {}", className, t.getMessage());
-            return null;
         }
+        CLASS_CACHE.put(className, result == null ? MissingMarker.INSTANCE : result);
+        return result;
     }
 
     public static Method safeGetMethod(Class<?> clazz, String methodName, Class<?>... parameterTypes) {
         if (clazz == null) return null;
+        StringBuilder sb = new StringBuilder(methodName).append('(');
+        for (Class<?> pt : parameterTypes) {
+            sb.append(pt == null ? "null" : pt.getName()).append(',');
+        }
+        String key = sb.append(')').toString();
+
+        Map<String, Object> methods = METHOD_CACHE.get(clazz);
+        Object cached = methods.get(key);
+        if (cached != null) return cached == MissingMarker.INSTANCE ? null : (Method) cached;
+        Method result = null;
         try {
-            return clazz.getMethod(methodName, parameterTypes);
+            result = clazz.getMethod(methodName, parameterTypes);
         } catch (Throwable t) {
             LOGGER.trace("Failed to get method {} on {}: {}", methodName, clazz.getName(), t.getMessage());
-            return null;
         }
+        methods.put(key, result == null ? MissingMarker.INSTANCE : result);
+        return result;
     }
 
     public static Field safeGetField(Class<?> clazz, String fieldName) {
         if (clazz == null) return null;
+        Map<String, Object> fields = FIELD_CACHE.get(clazz);
+        Object cached = fields.get(fieldName);
+        if (cached != null) return cached == MissingMarker.INSTANCE ? null : (Field) cached;
+        Field result = null;
         try {
-            return clazz.getField(fieldName);
+            result = clazz.getField(fieldName);
         } catch (Throwable t) {
             LOGGER.trace("Failed to get field {} on {}: {}", fieldName, clazz.getName(), t.getMessage());
-            return null;
         }
+        fields.put(fieldName, result == null ? MissingMarker.INSTANCE : result);
+        return result;
     }
 
     /**
