@@ -55,6 +55,37 @@ public class TacticalDebugPanel {
     public static void setStatus(String msg) {
         statusMessage = msg;
         statusMessageExpiry = System.currentTimeMillis() + 2500L;
+        // HUD 小窗的每个设置变更都紧跟着 setStatus，因此在此统一请求落盘。
+        // (全屏控制台各处显式调用 saveConfig，而小窗原先只在拖动面板时保存，
+        //  导致切换开关/调整数值后退出游戏即丢失。)
+        requestConfigSave();
+    }
+
+    // --- 配置落盘节流 ---
+    // SPEC.save() 是全量写盘，不能在每次点击时直呼。这里限流为最多每 800ms 一次，
+    // 并在关闭控制态/退出游戏时强制补一次，确保最终一致。
+    private static long lastConfigSaveMs = 0L;
+    private static boolean configSavePending = false;
+    private static final long CONFIG_SAVE_MIN_INTERVAL_MS = 800L;
+
+    private static void requestConfigSave() {
+        long now = System.currentTimeMillis();
+        if (now - lastConfigSaveMs >= CONFIG_SAVE_MIN_INTERVAL_MS) {
+            lastConfigSaveMs = now;
+            configSavePending = false;
+            AutoAttackerConfig.saveConfig();
+        } else {
+            configSavePending = true;
+        }
+    }
+
+    /** 立即补写未落盘的配置改动 (在关闭控制态/退出时调用) */
+    public static void flushPendingConfigSave() {
+        if (configSavePending) {
+            configSavePending = false;
+            lastConfigSaveMs = System.currentTimeMillis();
+            AutoAttackerConfig.saveConfig();
+        }
     }
 
     // 二次确认防误触状态戳 (3秒超时自动复原)
@@ -117,6 +148,7 @@ public class TacticalDebugPanel {
             isControlActive = false;
             isDragging = false;
             AutoBallisticsTracker.saveToDiskImmediate();
+            flushPendingConfigSave();
         }
     }
 
