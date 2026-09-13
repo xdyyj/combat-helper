@@ -1092,7 +1092,7 @@ public class TacticalConsoleScreen extends Screen {
         int resetX = 10;
         boolean resetHov = mouseX >= resetX && mouseX <= resetX + btnW && mouseY >= btnY && mouseY <= btnY + btnH;
         long now = System.currentTimeMillis();
-        boolean resetConfirming = (now - footerResetConfirmTime <= 3000L);
+        boolean resetConfirming = UIItem.isConfirmPending(footerResetConfirmTime, now);
         graphics.fill(resetX, btnY, resetX + btnW, btnY + btnH, resetConfirming ? (resetHov ? 0xFFDA3633 : 0xFF8A2424) : (resetHov ? 0xFF2B313A : 0xFF21262D));
         graphics.renderOutline(resetX, btnY, btnW, btnH, resetConfirming ? 0xFFF85149 : (resetHov ? 0xFF8B949E : 0x25FFFFFF));
         graphics.drawCenteredString(font, resetConfirming ? "§c再次点击确认" : "重置当前页", resetX + btnW / 2, btnY + 6, resetConfirming ? 0xFFFFFFFF : (resetHov ? 0xFFFFFFFF : 0xFFC9D1D9));
@@ -1142,7 +1142,7 @@ public class TacticalConsoleScreen extends Screen {
             int resetX = 10;
             if (mouseX >= resetX && mouseX <= resetX + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
                 long now = System.currentTimeMillis();
-                if (now - footerResetConfirmTime > 3000L) {
+                if (UIItem.isConfirmExpired(footerResetConfirmTime, now)) {
                     footerResetConfirmTime = now;
                     showToast("请在 3 秒内再次点击以确认重置当前页");
                     return true;
@@ -1284,9 +1284,146 @@ public class TacticalConsoleScreen extends Screen {
     // =========================================================================
 
     public abstract static class UIItem {
+        /** 全局高危操作二次确认窗口 (毫秒) */
+        static final long CONFIRM_WINDOW_MS = 3000L;
+
         int x, y, w, h;
         abstract void render(GuiGraphics graphics, Font font, int mouseX, int mouseContentY, int realMouseY, TacticalConsoleScreen screen);
         abstract boolean mouseClicked(double mouseX, double mouseY, int button);
+
+        /** 卡片/控件通用悬停判定 */
+        final boolean isHovered(int mouseX, int mouseContentY) {
+            return mouseX >= x && mouseX <= x + w && mouseContentY >= y && mouseContentY <= y + h;
+        }
+
+        /** 通用卡片外框:深色底 + 悬停高亮描边 */
+        final void drawCardFrame(GuiGraphics graphics, boolean hovered) {
+            graphics.fill(x, y, x + w, y + h, hovered ? 0xFF161B22 : 0x08FFFFFF);
+            graphics.renderOutline(x, y, w, h, hovered ? 0x33FFFFFF : 0x12FFFFFF);
+        }
+
+        /** (i) 战术徽章水平起点 (依赖 label 宽度) */
+        final int infoBadgeX(Font font, String label) {
+            return x + 6 + font.width(label) + 5;
+        }
+
+        /**
+         * 渲染 (i) 战术徽章并处理 tooltip 悬浮。
+         * @param infoYOffset 徽章相对 y 的垂直偏移
+         * @param iTextYOffset "i" 字符相对徽章顶部的基线偏移
+         */
+        final void drawInfoBadge(GuiGraphics graphics, Font font, String label,
+                                 List<Component> tooltip, int mouseX, int mouseContentY,
+                                 int realMouseY, TacticalConsoleScreen screen,
+                                 int infoYOffset, int iTextYOffset) {
+            int infoSize = 11;
+            int infoX = infoBadgeX(font, label);
+            int infoY = y + infoYOffset;
+            boolean infoHov = mouseX >= infoX && mouseX <= infoX + infoSize
+                    && mouseContentY >= infoY && mouseContentY <= infoY + infoSize;
+
+            if (tooltip != null && !tooltip.isEmpty()) {
+                graphics.fill(infoX, infoY, infoX + infoSize, infoY + infoSize, infoHov ? 0xFF1F6FEB : 0x1AFFFFFF);
+                graphics.renderOutline(infoX, infoY, infoSize, infoSize, infoHov ? 0xFF58A6FF : 0x33FFFFFF);
+                graphics.drawCenteredString(font, "i", infoX + infoSize / 2, infoY + iTextYOffset, infoHov ? 0xFFFFFFFF : 0xFF8B949E);
+
+                if (infoHov) {
+                    screen.setHoveredTooltip(tooltip, mouseX, realMouseY);
+                }
+            }
+        }
+
+        /** 判断点击是否落在 (i) 徽章区域内 (徽章仅用于查看 tooltip,不触发切换) */
+        final boolean isInfoBadgeClicked(double mouseX, double mouseY, String label, int infoYOffset) {
+            int infoSize = 11;
+            int infoX = infoBadgeX(Minecraft.getInstance().font, label);
+            int infoY = y + infoYOffset;
+            return mouseX >= infoX && mouseX <= infoX + infoSize
+                    && mouseY >= infoY && mouseY <= infoY + infoSize;
+        }
+
+        /** 高危操作二次确认:窗口外的首次点击视为"进入确认态" */
+        static boolean isConfirmExpired(long lastClickTime, long now) {
+            return now - lastClickTime > CONFIRM_WINDOW_MS;
+        }
+
+        /** 高危操作二次确认:是否处于确认等待态 */
+        static boolean isConfirmPending(long lastClickTime, long now) {
+            return now - lastClickTime <= CONFIRM_WINDOW_MS;
+        }
+    }
+
+    /**
+     * 通用「红 X 删除 + 3 秒二次确认」按钮。
+     * 首次点击进入确认态 (按钮展宽并显示"确认?")，窗口内再次点击才执行删除；
+     * 超时或确认后自动复位。
+     *
+     * 抽出前 ListEntryCard / ProfileArchiveCard 各自复制了一份完整实现。
+     */
+    public static final class DeleteConfirmButton {
+        private final int btnYOffset;
+        private long confirmTime = 0L;
+
+        /** @param btnYOffset 按钮相对卡片 y 的垂直偏移 */
+        DeleteConfirmButton(int btnYOffset) {
+            this.btnYOffset = btnYOffset;
+        }
+
+        private boolean isPending() {
+            return UIItem.isConfirmPending(confirmTime, System.currentTimeMillis());
+        }
+
+        private int btnW(boolean pending) {
+            return pending ? 36 : 16;
+        }
+
+        /** 当前状态下按钮宽度 (供调用方计算文字可用宽度) */
+        int currentWidth() {
+            return btnW(isPending());
+        }
+
+        private boolean isHovered(int mouseX, int mouseContentY, int x, int y, int w, boolean pending) {
+            int bw = btnW(pending);
+            int bx = x + w - bw - 4;
+            int by = y + btnYOffset;
+            return mouseX >= bx && mouseX <= bx + bw && mouseContentY >= by && mouseContentY <= by + 16;
+        }
+
+        /** 渲染按钮 (需在卡片外框之后调用) */
+        void render(GuiGraphics graphics, Font font, int mouseX, int mouseContentY, int x, int y, int w) {
+            boolean pending = isPending();
+            int bw = btnW(pending);
+            int bx = x + w - bw - 4;
+            int by = y + btnYOffset;
+            boolean hov = isHovered(mouseX, mouseContentY, x, y, w, pending);
+
+            int bgCol = pending ? (hov ? 0xFFDA3633 : 0xFF8A2424) : (hov ? 0xFF8A2424 : 0xFF21262D);
+            int borderCol = pending ? 0xFFF85149 : (hov ? 0xFFC93B3B : 0x22FFFFFF);
+
+            graphics.fill(bx, by, bx + bw, by + 16, bgCol);
+            graphics.renderOutline(bx, by, bw, 16, borderCol);
+            graphics.drawCenteredString(font, pending ? "确认?" : "x", bx + bw / 2, by + 4, 0xFFFFFFFF);
+        }
+
+        /**
+         * 处理点击。命中且通过二次确认时执行 onDelete。
+         * @return 是否消费了本次点击
+         */
+        boolean mouseClicked(double mouseX, double mouseY, int x, int y, int w, Runnable onDelete) {
+            boolean pending = isPending();
+            if (!isHovered((int) mouseX, (int) mouseY, x, y, w, pending)) {
+                return false;
+            }
+
+            long now = System.currentTimeMillis();
+            if (UIItem.isConfirmExpired(confirmTime, now)) {
+                confirmTime = now;
+                return true;
+            }
+            confirmTime = 0L;
+            onDelete.run();
+            return true;
+        }
     }
 
     public static class HeaderItem extends UIItem {
@@ -1346,29 +1483,15 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         void render(GuiGraphics graphics, Font font, int mouseX, int mouseContentY, int realMouseY, TacticalConsoleScreen screen) {
-            boolean hovered = mouseX >= x && mouseX <= x + w && mouseContentY >= y && mouseContentY <= y + h;
+            boolean hovered = isHovered(mouseX, mouseContentY);
             boolean active = getter.get();
 
-            graphics.fill(x, y, x + w, y + h, hovered ? 0xFF161B22 : 0x08FFFFFF);
-            graphics.renderOutline(x, y, w, h, hovered ? 0x33FFFFFF : 0x12FFFFFF);
+            drawCardFrame(graphics, hovered);
 
             graphics.drawString(font, label, x + 6, y + 7, 0xFFF0F6FC, false);
 
             // (i) 徽章渲染
-            int infoSize = 11;
-            int infoX = x + 6 + font.width(label) + 5;
-            int infoY = y + 5;
-            boolean infoHov = mouseX >= infoX && mouseX <= infoX + infoSize && mouseContentY >= infoY && mouseContentY <= infoY + infoSize;
-
-            if (tooltip != null && !tooltip.isEmpty()) {
-                graphics.fill(infoX, infoY, infoX + infoSize, infoY + infoSize, infoHov ? 0xFF1F6FEB : 0x1AFFFFFF);
-                graphics.renderOutline(infoX, infoY, infoSize, infoSize, infoHov ? 0xFF58A6FF : 0x33FFFFFF);
-                graphics.drawCenteredString(font, "i", infoX + infoSize / 2, infoY + 2, infoHov ? 0xFFFFFFFF : 0xFF8B949E);
-
-                if (infoHov) {
-                    screen.setHoveredTooltip(tooltip, mouseX, realMouseY);
-                }
-            }
+            drawInfoBadge(graphics, font, label, tooltip, mouseX, mouseContentY, realMouseY, screen, 5, 2);
 
             int sw = 28;
             int sh = 13;
@@ -1385,10 +1508,7 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         boolean mouseClicked(double mouseX, double mouseY, int button) {
-            int infoSize = 11;
-            int infoX = x + 6 + Minecraft.getInstance().font.width(label) + 5;
-            int infoY = y + 5;
-            if (mouseX >= infoX && mouseX <= infoX + infoSize && mouseY >= infoY && mouseY <= infoY + infoSize) {
+            if (isInfoBadgeClicked(mouseX, mouseY, label, 5)) {
                 return true; // 仅供查看 Tooltip，不触发切换
             }
             setter.accept(!getter.get());
@@ -1412,27 +1532,13 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         void render(GuiGraphics graphics, Font font, int mouseX, int mouseContentY, int realMouseY, TacticalConsoleScreen screen) {
-            boolean hovered = mouseX >= x && mouseX <= x + w && mouseContentY >= y && mouseContentY <= y + h;
-            graphics.fill(x, y, x + w, y + h, hovered ? 0xFF161B22 : 0x08FFFFFF);
-            graphics.renderOutline(x, y, w, h, hovered ? 0x33FFFFFF : 0x12FFFFFF);
+            boolean hovered = isHovered(mouseX, mouseContentY);
+            drawCardFrame(graphics, hovered);
 
             graphics.drawString(font, label, x + 6, y + 7, 0xFFF0F6FC, false);
 
             // (i) 徽章渲染
-            int infoSize = 11;
-            int infoX = x + 6 + font.width(label) + 5;
-            int infoY = y + 5;
-            boolean infoHov = mouseX >= infoX && mouseX <= infoX + infoSize && mouseContentY >= infoY && mouseContentY <= infoY + infoSize;
-
-            if (tooltip != null && !tooltip.isEmpty()) {
-                graphics.fill(infoX, infoY, infoX + infoSize, infoY + infoSize, infoHov ? 0xFF1F6FEB : 0x1AFFFFFF);
-                graphics.renderOutline(infoX, infoY, infoSize, infoSize, infoHov ? 0xFF58A6FF : 0x33FFFFFF);
-                graphics.drawCenteredString(font, "i", infoX + infoSize / 2, infoY + 2, infoHov ? 0xFFFFFFFF : 0xFF8B949E);
-
-                if (infoHov) {
-                    screen.setHoveredTooltip(tooltip, mouseX, realMouseY);
-                }
-            }
+            drawInfoBadge(graphics, font, label, tooltip, mouseX, mouseContentY, realMouseY, screen, 5, 2);
 
             String curVal = valueGetter.get();
             int cw = Math.max(48, font.width(curVal) + 16);
@@ -1448,10 +1554,7 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         boolean mouseClicked(double mouseX, double mouseY, int button) {
-            int infoSize = 11;
-            int infoX = x + 6 + Minecraft.getInstance().font.width(label) + 5;
-            int infoY = y + 5;
-            if (mouseX >= infoX && mouseX <= infoX + infoSize && mouseY >= infoY && mouseY <= infoY + infoSize) {
+            if (isInfoBadgeClicked(mouseX, mouseY, label, 5)) {
                 return true;
             }
             cycleAction.run();
@@ -1480,27 +1583,13 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         void render(GuiGraphics graphics, Font font, int mouseX, int mouseContentY, int realMouseY, TacticalConsoleScreen screen) {
-            boolean hovered = mouseX >= x && mouseX <= x + w && mouseContentY >= y && mouseContentY <= y + h;
-            graphics.fill(x, y, x + w, y + h, hovered ? 0xFF161B22 : 0x08FFFFFF);
-            graphics.renderOutline(x, y, w, h, hovered ? 0x33FFFFFF : 0x12FFFFFF);
+            boolean hovered = isHovered(mouseX, mouseContentY);
+            drawCardFrame(graphics, hovered);
 
             graphics.drawString(font, label, x + 6, y + 3, 0xFFF0F6FC, false);
 
-            // (i) 徽章渲染
-            int infoSize = 11;
-            int infoX = x + 6 + font.width(label) + 5;
-            int infoY = y + 2;
-            boolean infoHov = mouseX >= infoX && mouseX <= infoX + infoSize && mouseContentY >= infoY && mouseContentY <= infoY + infoSize;
-
-            if (tooltip != null && !tooltip.isEmpty()) {
-                graphics.fill(infoX, infoY, infoX + infoSize, infoY + infoSize, infoHov ? 0xFF1F6FEB : 0x1AFFFFFF);
-                graphics.renderOutline(infoX, infoY, infoSize, infoSize, infoHov ? 0xFF58A6FF : 0x33FFFFFF);
-                graphics.drawCenteredString(font, "i", infoX + infoSize / 2, infoY + 1, infoHov ? 0xFFFFFFFF : 0xFF8B949E);
-
-                if (infoHov) {
-                    screen.setHoveredTooltip(tooltip, mouseX, realMouseY);
-                }
-            }
+            // (i) 徽章渲染 (滑块卡片排版更紧凑:徽章贴 y+2, 字基线 infoY+1)
+            drawInfoBadge(graphics, font, label, tooltip, mouseX, mouseContentY, realMouseY, screen, 2, 1);
 
             double val = getter.get();
             String valStr = String.format(Locale.ROOT, format, val);
@@ -1534,10 +1623,7 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         boolean mouseClicked(double mouseX, double mouseY, int button) {
-            int infoSize = 11;
-            int infoX = x + 6 + Minecraft.getInstance().font.width(label) + 5;
-            int infoY = y + 2;
-            if (mouseX >= infoX && mouseX <= infoX + infoSize && mouseY >= infoY && mouseY <= infoY + infoSize) {
+            if (isInfoBadgeClicked(mouseX, mouseY, label, 2)) {
                 return true;
             }
             int trackY = y + 12;
@@ -1577,8 +1663,8 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         void render(GuiGraphics graphics, Font font, int mouseX, int mouseContentY, int realMouseY, TacticalConsoleScreen screen) {
-            boolean hovered = mouseX >= x && mouseX <= x + w && mouseContentY >= y && mouseContentY <= y + h;
-            boolean isConfirming = confirmPrompt != null && (System.currentTimeMillis() - lastClickTime <= 3000L);
+            boolean hovered = isHovered(mouseX, mouseContentY);
+            boolean isConfirming = confirmPrompt != null && UIItem.isConfirmPending(lastClickTime, System.currentTimeMillis());
 
             int bg = isConfirming ? (hovered ? 0xFF8A2424 : 0xFF3D1616) : (hovered ? 0xFF21262D : 0xFF161B22);
             int border = isConfirming ? 0xFFF85149 : (hovered ? 0xFF58A6FF : 0x22FFFFFF);
@@ -1599,7 +1685,7 @@ public class TacticalConsoleScreen extends Screen {
         boolean mouseClicked(double mouseX, double mouseY, int button) {
             if (confirmPrompt != null) {
                 long now = System.currentTimeMillis();
-                if (now - lastClickTime > 3000L) {
+                if (UIItem.isConfirmExpired(lastClickTime, now)) {
                     lastClickTime = now;
                     if (Minecraft.getInstance().screen instanceof TacticalConsoleScreen sc) {
                         sc.showToast("请在 3 秒内再次点击以确认");
@@ -1647,8 +1733,8 @@ public class TacticalConsoleScreen extends Screen {
             boolean hov2 = mouseX >= x2 && mouseX <= x2 + halfW && mouseContentY >= y && mouseContentY <= y + h;
 
             long now = System.currentTimeMillis();
-            boolean isConf1 = reqConfirm1 && (now - confirm1Time <= 3000L);
-            boolean isConf2 = reqConfirm2 && (now - confirm2Time <= 3000L);
+            boolean isConf1 = reqConfirm1 && UIItem.isConfirmPending(confirm1Time, now);
+            boolean isConf2 = reqConfirm2 && UIItem.isConfirmPending(confirm2Time, now);
 
             int bg1 = isConf1 ? (hov1 ? 0xFFDA3633 : 0xFF8A2424) : (hov1 ? 0xFF8A2424 : 0xFF1C2128);
             int border1 = isConf1 ? 0xFFF85149 : (hov1 ? 0xFFC93B3B : 0x22FFFFFF);
@@ -1676,7 +1762,7 @@ public class TacticalConsoleScreen extends Screen {
 
             if (mouseX >= x1 && mouseX <= x1 + halfW && mouseY >= y && mouseY <= y + h) {
                 if (reqConfirm1) {
-                    if (now - confirm1Time > 3000L) {
+                    if (UIItem.isConfirmExpired(confirm1Time, now)) {
                         confirm1Time = now;
                         confirm2Time = 0L;
                         if (Minecraft.getInstance().screen instanceof TacticalConsoleScreen sc) {
@@ -1691,7 +1777,7 @@ public class TacticalConsoleScreen extends Screen {
             }
             if (mouseX >= x2 && mouseX <= x2 + halfW && mouseY >= y && mouseY <= y + h) {
                 if (reqConfirm2) {
-                    if (now - confirm2Time > 3000L) {
+                    if (UIItem.isConfirmExpired(confirm2Time, now)) {
                         confirm2Time = now;
                         confirm1Time = 0L;
                         if (Minecraft.getInstance().screen instanceof TacticalConsoleScreen sc) {
@@ -2126,7 +2212,7 @@ public class TacticalConsoleScreen extends Screen {
         private final String rawId;
         private final boolean isEntity;
         private final Runnable onDelete;
-        private long deleteConfirmTime = 0L;
+        private final DeleteConfirmButton deleteButton = new DeleteConfirmButton(4);
 
         ListEntryCard(String rawId, boolean isEntity, Runnable onDelete) {
             this.rawId = rawId;
@@ -2137,48 +2223,21 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         void render(GuiGraphics graphics, Font font, int mouseX, int mouseContentY, int realMouseY, TacticalConsoleScreen screen) {
-            boolean hovered = mouseX >= x && mouseX <= x + w && mouseContentY >= y && mouseContentY <= y + h;
-            graphics.fill(x, y, x + w, y + h, hovered ? 0xFF161B22 : 0x08FFFFFF);
-            graphics.renderOutline(x, y, w, h, hovered ? 0x33FFFFFF : 0x12FFFFFF);
-
-            boolean isConfirming = System.currentTimeMillis() - deleteConfirmTime <= 3000L;
-            int btnW = isConfirming ? 36 : 16;
-            int btnH = 16;
-            int btnX = x + w - btnW - 4;
-            int btnY = y + 4;
-            boolean btnHov = mouseX >= btnX && mouseX <= btnX + btnW && mouseContentY >= btnY && mouseContentY <= btnY + btnH;
+            boolean hovered = isHovered(mouseX, mouseContentY);
+            drawCardFrame(graphics, hovered);
 
             String displayName = getReadableEntryName(rawId, isEntity);
-            int maxNameW = btnX - x - 10;
+            // 与旧实现一致:确认态下按钮展宽,名字可用宽度随之收窄
+            int maxNameW = (x + w - deleteButton.currentWidth() - 4) - x - 10;
             String trimmed = font.plainSubstrByWidth(displayName + " §8(" + rawId + ")", maxNameW);
             graphics.drawString(font, trimmed, x + 6, y + 8, 0xFFF0F6FC, false);
 
-            int bgCol = isConfirming ? (btnHov ? 0xFFDA3633 : 0xFF8A2424) : (btnHov ? 0xFF8A2424 : 0xFF21262D);
-            int borderCol = isConfirming ? 0xFFF85149 : (btnHov ? 0xFFC93B3B : 0x22FFFFFF);
-
-            graphics.fill(btnX, btnY, btnX + btnW, btnY + btnH, bgCol);
-            graphics.renderOutline(btnX, btnY, btnW, btnH, borderCol);
-            graphics.drawCenteredString(font, isConfirming ? "确认?" : "x", btnX + btnW / 2, btnY + 4, 0xFFFFFFFF);
+            deleteButton.render(graphics, font, mouseX, mouseContentY, x, y, w);
         }
 
         @Override
         boolean mouseClicked(double mouseX, double mouseY, int button) {
-            boolean isConfirming = System.currentTimeMillis() - deleteConfirmTime <= 3000L;
-            int btnW = isConfirming ? 36 : 16;
-            int btnH = 16;
-            int btnX = x + w - btnW - 4;
-            int btnY = y + 4;
-            if (mouseX >= btnX && mouseX <= btnX + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
-                long now = System.currentTimeMillis();
-                if (now - deleteConfirmTime > 3000L) {
-                    deleteConfirmTime = now;
-                    return true;
-                }
-                deleteConfirmTime = 0L;
-                onDelete.run();
-                return true;
-            }
-            return false;
+            return deleteButton.mouseClicked(mouseX, mouseY, x, y, w, onDelete);
         }
     }
 
@@ -2186,7 +2245,7 @@ public class TacticalConsoleScreen extends Screen {
         private final String sig;
         private final AutoBallisticsTracker.BallisticsProfile profile;
         private final Runnable onDelete;
-        private long deleteConfirmTime = 0L;
+        private final DeleteConfirmButton deleteButton = new DeleteConfirmButton(6);
 
         ProfileArchiveCard(String sig, AutoBallisticsTracker.BallisticsProfile profile, Runnable onDelete) {
             this.sig = sig;
@@ -2197,9 +2256,8 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         void render(GuiGraphics graphics, Font font, int mouseX, int mouseContentY, int realMouseY, TacticalConsoleScreen screen) {
-            boolean hovered = mouseX >= x && mouseX <= x + w && mouseContentY >= y && mouseContentY <= y + h;
-            graphics.fill(x, y, x + w, y + h, hovered ? 0xFF161B22 : 0x08FFFFFF);
-            graphics.renderOutline(x, y, w, h, hovered ? 0x33FFFFFF : 0x12FFFFFF);
+            boolean hovered = isHovered(mouseX, mouseContentY);
+            drawCardFrame(graphics, hovered);
 
             String readableName = getReadableWeaponName(sig);
             String briefStats;
@@ -2210,44 +2268,17 @@ public class TacticalConsoleScreen extends Screen {
                         profile.speed, profile.gravity, profile.minChargeTicks);
             }
 
-            boolean isConfirming = System.currentTimeMillis() - deleteConfirmTime <= 3000L;
-            int delBtnW = isConfirming ? 36 : 16;
-            int delBtnH = 16;
-            int delBtnX = x + w - delBtnW - 4;
-            int delBtnY = y + 6;
-
-            int availW = delBtnX - x - 10;
+            int availW = (x + w - deleteButton.currentWidth() - 4) - x - 10;
             String line = readableName + " §8" + briefStats;
             String trimmed = font.plainSubstrByWidth(line, availW);
             graphics.drawString(font, trimmed, x + 6, y + 10, 0xFFF0F6FC, false);
 
-            boolean delHov = mouseX >= delBtnX && mouseX <= delBtnX + delBtnW && mouseContentY >= delBtnY && mouseContentY <= delBtnY + delBtnH;
-            int bgCol = isConfirming ? (delHov ? 0xFFDA3633 : 0xFF8A2424) : (delHov ? 0xFF8A2424 : 0xFF21262D);
-            int borderCol = isConfirming ? 0xFFF85149 : (delHov ? 0xFFC93B3B : 0x22FFFFFF);
-
-            graphics.fill(delBtnX, delBtnY, delBtnX + delBtnW, delBtnY + delBtnH, bgCol);
-            graphics.renderOutline(delBtnX, delBtnY, delBtnW, delBtnH, borderCol);
-            graphics.drawCenteredString(font, isConfirming ? "确认?" : "x", delBtnX + delBtnW / 2, delBtnY + 4, 0xFFFFFFFF);
+            deleteButton.render(graphics, font, mouseX, mouseContentY, x, y, w);
         }
 
         @Override
         boolean mouseClicked(double mouseX, double mouseY, int button) {
-            boolean isConfirming = System.currentTimeMillis() - deleteConfirmTime <= 3000L;
-            int delBtnW = isConfirming ? 36 : 16;
-            int delBtnH = 16;
-            int delBtnX = x + w - delBtnW - 4;
-            int delBtnY = y + 6;
-            if (mouseX >= delBtnX && mouseX <= delBtnX + delBtnW && mouseY >= delBtnY && mouseY <= delBtnY + delBtnH) {
-                long now = System.currentTimeMillis();
-                if (now - deleteConfirmTime > 3000L) {
-                    deleteConfirmTime = now;
-                    return true;
-                }
-                deleteConfirmTime = 0L;
-                onDelete.run();
-                return true;
-            }
-            return false;
+            return deleteButton.mouseClicked(mouseX, mouseY, x, y, w, onDelete);
         }
     }
 }
