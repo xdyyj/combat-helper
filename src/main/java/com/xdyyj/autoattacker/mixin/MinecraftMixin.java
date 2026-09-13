@@ -46,14 +46,20 @@ public abstract class MinecraftMixin {
                 return;
             }
 
-            // Drain the vanilla attack key clicks so vanilla doesn't duplicate attack/swing
+            // 仅消费点击队列（防止原版重复攻击/挥砍）。
+            // 注意：此处【不能】无条件转发 LeftClickEmpty —— 那样会在蓄力未满时也通知
+            // 服务端，而服务端对依赖满蓄力的特效(如 Botania 剑气)会因其 attackStrength
+            // 不足而丢弃，反而打乱节奏。空挥通知统一由 performAttack 在满蓄力时发出。
             while (this.options.keyAttack.consumeClick()) {
                 // Do nothing
             }
 
             if (this.options.keyAttack.isDown()) {
-                // Use 0.5F adjustTicks to align with vanilla server/client attack strength scale calculations
-                if (this.player.getAttackStrengthScale(0.5F) >= 1.0F) {
+                // 用 0.0F 与服务端校验基准一致：Botania 的 LeftClickPacket.handle 内部
+                // 取的是 getAttackStrengthScale(0.0F)。若客户端用 0.5F 提前半 tick 判定为满，
+                // 服务端可能仍未满(高攻速武器周期仅 2 tick 时尤其明显)，依赖满蓄力的特效
+                // 会被丢弃，表现为「偶尔掉一发光束」。
+                if (this.player.getAttackStrengthScale(0.0F) >= 1.0F) {
                     ClientEvents.performAttack(mc, this.player);
                 }
             }

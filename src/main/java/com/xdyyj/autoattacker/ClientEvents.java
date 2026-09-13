@@ -91,6 +91,10 @@ public class ClientEvents {
     // 否则压枪/吸附自己每帧转动的角度会被误计为玩家甩枪，形成自阻尼闭环。
     private float selfAppliedYaw = 0f;
     private float selfAppliedPitch = 0f;
+    // 上一帧自瞄「尚未完成的追踪量」(度)。用于区分「相机变化来自自瞄追目标」与
+    // 「来自玩家甩枪」：前者即使本模组只写入了一部分，缺口也不该算作玩家操作。
+    private float lastAimTrackingGapYaw = 0f;
+    private float lastAimTrackingGapPitch = 0f;
 
     // --- 动态相对运动前馈补偿状态 (Dynamic Rotational Kinematic Feedforward) ---
     private LivingEntity lastTrackedTarget = null;
@@ -111,8 +115,43 @@ public class ClientEvents {
     private ItemStack lastSwapWatchItem = ItemStack.EMPTY;
     private final SwapTransit swapTransit = new SwapTransit();
     private static final long SWAP_TRANSIT_DURATION_NANOS = 320_000_000L; // 320ms 过渡窗口
-    private static final float SWAP_TRANSIT_RATE_START = 1.2f;            // 过渡起始最大角速度 (度/秒)
-    private static final float SWAP_TRANSIT_RATE_FULL = 6.0f;             // 过渡结束时的最大角速度 (度/秒)
+    // 速率上限（度/秒）。换武器瞬间目标角可能突变数十度，若上限过低，320ms 窗口内
+    // 只能转过不到 2°，窗口一结束便直接跳到目标角 —— 视觉上仍是「瞬间跳跃」。
+    // 取值需保证常见突变（~90°）能在窗口内收敛：90° / 0.32s ≈ 281°/s。
+    private static final float SWAP_TRANSIT_RATE_START = 30.0f;           // 过渡起始最大角速度 (度/秒)
+    private static final float SWAP_TRANSIT_RATE_FULL = 320.0f;           // 过渡结束时的最大角速度 (度/秒)
+
+    // 走位前馈的合理上限 (度/帧)。正常走位引起的目标相对角位移远小于此值；
+    // 超出者基本都源于目标自身移动或方位角几何翻转，不应前馈。
+    private static final float KINEMATIC_FEEDFORWARD_MAX_DEG = 15.0f;
+
+    // 自瞄「忙碌」判据：上一帧未完成的追踪缺口超过此角度时，认为相机转动由自瞄主导，
+    // 该帧的相机位移不计入玩家偏转(死区)累计。
+    private static final float AIM_TRACKING_BUSY_DEG = 3.0f;
+
+    // 自瞄追踪期间，单帧残差的限幅值 (度)。平滑跟踪的追赶滞后残差通常远小于此，
+    // 而玩家主动甩枪的单帧位移通常远大于此，故限幅可压制滞后而不影响真实操作。
+    private static final float DEADZONE_RESIDUAL_CLAMP_DEG = 2.0f;
+
+    // 部位锁定切换的瞄准高度平滑速率 (格/秒)。见 smoothAimHeight。
+    private static final double AIM_HEIGHT_SMOOTH_RATE = 1.8D;
+
+    // 部位锁定平滑状态 (见 smoothAimHeight)
+    private LivingEntity smoothedAimHeightTarget = null;
+    private double smoothedAimHeight = Double.NaN;
+
+    // 切换目标的门槛倍数 (相对死区阈值) 与收益余量。切换是重决策，需明显高于
+    // 普通死区且新目标确有更优评分，避免微残差引发「切走又切回」的乒乓。
+    private static final double TARGET_SWITCH_THRESHOLD_MULT = 1.6D;
+    private static final double TARGET_SWITCH_GAIN_MARGIN = 0.10D;
+
+    // 自动转火的搜索角度 (度)。保持原有 90° 不变 —— 该值决定「多远的目标可被转火选中」，
+    // 属功能能力而非灵敏度，无明确证据不应收窄。
+    private static final float AUTO_SWITCH_MAX_ANGLE = 90.0f;
+
+    // 切换目标时最多对多少个候选做视线检测。候选先按与准星的夹角升序排列，
+    // 因此只需检查最靠近准星的前若干个，避免在大范围内逐一做昂贵的射线检测。
+    private static final int MAX_SWITCH_CANDIDATE_SCANS = 4;
 
     // 速度采样
     private static final int VEL_SAMPLE_CAP = 3;
@@ -200,6 +239,13 @@ public class ClientEvents {
         mouseDeflectionYaw = 0f;
         mouseDeflectionPitch = 0f;
         mouseActivity = 0f;
+        // 自转剔除基准同样归零：切换/放弃目标后相机基准已无意义，若保留旧增量，
+        // 下一帧 wrapDegrees(cur - lastLocked) - selfApplied 会把两帧间的真实位移
+        // 全算进 mouseDeflection，可能直接越过甩脱阈值而解除锁定。
+        selfAppliedYaw = 0f;
+        selfAppliedPitch = 0f;
+        lastAimTrackingGapYaw = 0f;
+        lastAimTrackingGapPitch = 0f;
         for (int i = 0; i < VEL_SAMPLE_CAP; i++) {
             velSamples[i] = Vec3.ZERO;
         }
@@ -323,6 +369,10 @@ public class ClientEvents {
                                 Vec3 eye = player.getEyePosition();
                                 double targetDistXZ = Math.hypot(currentTarget.getX() - eye.x, currentTarget.getZ() - eye.z);
                                 double targetY = computeTargetY(currentTarget, 1.0f, AutoAttackerConfig.TARGET_PART.get(), false, true, targetDistXZ);
+                                // 与渲染帧的瞄准高度保持同源平滑：否则屏幕准星(平滑后)与
+                                // 实际射击点(原始高度)会错开，表现为箭矢偏离准星。
+                                // advance=false：此处只读取渲染帧已推进的平滑值，不重复迭代。
+                                targetY = smoothAimHeight(currentTarget, targetY, 1.0f / 20.0f, false);
                                 Vec3 baseAimPoint = new Vec3(currentTarget.getX(), targetY, currentTarget.getZ());
 
                                 float sendYaw = player.getYRot();
@@ -333,7 +383,7 @@ public class ClientEvents {
                                     double dY = targetY - eye.y;
                                     double dZ = currentTarget.getZ() - eye.z;
                                     double horizDist = Math.sqrt(dX * dX + dZ * dZ);
-                                    sendYaw = (float) (Mth.atan2(dZ, dX) * (180D / Math.PI)) - 90.0F;
+                                    sendYaw = safeAimYaw(dX, dZ, player.getYRot());
                                     sendPitch = (float) -(Mth.atan2(dY, horizDist) * (180D / Math.PI));
                                 } else {
                                     PredictedAim predicted = computePredictedAim(player, currentTarget, profile.speed, profile.gravity, eye, baseAimPoint);
@@ -625,27 +675,48 @@ public class ClientEvents {
 
                 // 目标丢锁、死亡与自动切换目标 (Auto-Switch Target)
                 if (currentTarget != null) {
-                    double maxLockDist = (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get())
-                            ? Math.max(64.0, AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get())
-                            : 64.0;
+                    // 锁定保持距离应与搜索距离同源：此前枪械硬编码 64.0，
+                    // 而搜索用的是 AIM_ASSIST_RANGE(默认/常见配置为 120)，
+                    // 导致 64 格外的目标「能锁上但立刻被判超距脱锁」反复闪跳。
+                    double maxLockDist = Math.max(64.0, AutoAttackerConfig.AIM_ASSIST_RANGE.get());
+                    if (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get()) {
+                        maxLockDist = Math.max(maxLockDist, AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get());
+                    }
                     boolean isInvalid = !isValidTarget(player, currentTarget);
                     boolean isOutOfRange = currentTarget.level() != player.level() || currentTarget.distanceToSqr(player) > maxLockDist * maxLockDist;
 
+                    // 自动转火(enableAutoSwitchTarget)是独立开关，只要它开启就生效，
+                    // 不因 autoLockMode 而改变存在性 —— 避免静默禁用用户已开启的功能。
+                    boolean autoSwitchAllowed = AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get();
+
                     if (isInvalid || isOutOfRange) {
-                        if (AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()) {
-                            // 目标死亡或超距，毫秒级无缝自动寻觅切换下一位最佳目标！
-                            currentTarget = getPrioritizedTarget(player, searchRange, 90.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), currentTarget);
+                        // 「目标已失效」(死亡/移除/变友军/旁观/进排除名单) 属确定性失效，立即处理；
+                        // 仅「超距」给宽容期 —— 目标在射程边缘来回移动会反复越界，零宽容会使锁定闪断。
+                        boolean hardInvalid = isInvalid;
+                        if (hardInvalid) {
+                            if (autoSwitchAllowed) {
+                                currentTarget = pickBetterTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
+                            } else {
+                                currentTarget = null;
+                            }
                             lostTargetGraceTicks = 0;
                         } else {
-                            currentTarget = null;
-                            lostTargetGraceTicks = 0;
+                            lostTargetGraceTicks++;
+                            if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
+                                if (autoSwitchAllowed) {
+                                    currentTarget = pickBetterTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
+                                } else {
+                                    currentTarget = null;
+                                }
+                                lostTargetGraceTicks = 0;
+                            }
                         }
                     } else if (!hasLineOfSightMultiPoint(player, currentTarget)) {
                         lostTargetGraceTicks++;
                         if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
-                            if (AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()) {
-                                // 目标长时间隐蔽入掩体，自动转火视野内其他暴露目标
-                                currentTarget = getPrioritizedTarget(player, searchRange, 90.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), currentTarget);
+                            if (autoSwitchAllowed) {
+                                // 目标长时间隐蔽入掩体，转火视野内确有更优的暴露目标
+                                currentTarget = pickBetterTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
                                 lostTargetGraceTicks = 0;
                             } else {
                                 currentTarget = null;
@@ -721,19 +792,34 @@ public class ClientEvents {
     @SubscribeEvent
     public void onRenderTick(TickEvent.RenderTickEvent event) {
         if (event.phase != TickEvent.Phase.START) return;
+        // 开启新的渲染帧：使 FirearmAdapter.getGunStatus 的帧内缓存失效。
+        // 必须置于所有早退分支之前，否则暂停/无目标等早退会让缓存跨帧永久命中，
+        // 使 HUD 弹药数等状态不再刷新。
+        com.xdyyj.autoattacker.weapon.FirearmAdapter.beginGunStatusFrame();
         Minecraft mc = Minecraft.getInstance();
         Player player = mc.player;
         if (player == null || mc.level == null || mc.isPaused()) return;
 
         // 换武器检测必须最先执行：保证基线始终跟随实际手持物，
         // 否则早退分支会让 lastSwapWatchItem 陈旧，恢复后误判为"刚换武器"。
-        updateSwapTransit(player, ShoulderSurfingCompat.isShoulderSurfing());
+        updateSwapTransit(player);
 
-        if (ShoulderSurfingCompat.isShoulderSurfing() && ShoulderSurfingCompat.isFreeLooking()) {
+        boolean isShoulderNow = ShoulderSurfingCompat.isShoulderSurfing();
+        if (isShoulderNow && ShoulderSurfingCompat.isFreeLooking()) {
             wasLockedLastFrame = false;
             lastTrackedTarget = null;
             lastDestYaw = Float.NaN;
             lastDestPitch = Float.NaN;
+            // 同 lostTargetGrace 分支：不追踪期间须清空自转剔除量，否则恢复首帧会拿陈旧基准
+            // 相减，把期间的真实相机位移误判成玩家甩枪而解除锁定。
+            selfAppliedYaw = 0f;
+            selfAppliedPitch = 0f;
+            lastAimTrackingGapYaw = 0f;
+            lastAimTrackingGapPitch = 0f;
+            mouseDeflectionYaw = 0f;
+            mouseDeflectionPitch = 0f;
+            lastLockedYaw = 0f;
+            lastLockedPitch = 0f;
             com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
             return;
         }
@@ -748,6 +834,14 @@ public class ClientEvents {
             lastDestPitch = Float.NaN;
             selfAppliedYaw = 0f;
             selfAppliedPitch = 0f;
+            lastAimTrackingGapYaw = 0f;
+            lastAimTrackingGapPitch = 0f;
+            // 脱锁期间必须一并清空玩家偏转累计与上一帧锁定角：否则残留量会跨过这次
+            // 脱锁带到下一次锁定，新目标刚锁上就可能被上一次的残留量顶过死区而立刻甩脱。
+            mouseDeflectionYaw = 0f;
+            mouseDeflectionPitch = 0f;
+            lastLockedYaw = 0f;
+            lastLockedPitch = 0f;
             com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
             return;
         }
@@ -760,12 +854,11 @@ public class ClientEvents {
         if (!(deltaSec > 0f)) deltaSec = 1.0f / 60.0f;   // 含 NaN 判断
         if (deltaSec > 0.25f) deltaSec = 0.25f;
 
-        applyAimAssist(player, currentTarget, event.renderTickTime, deltaSec);
+        applyAimAssist(player, currentTarget, event.renderTickTime, deltaSec, isShoulderNow);
     }
 
-    private void applyAimAssist(Player player, LivingEntity target, float partialTick, float deltaSec) {
+    private void applyAimAssist(Player player, LivingEntity target, float partialTick, float deltaSec, boolean isShoulder) {
         Minecraft mc = Minecraft.getInstance();
-        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
 
         // --- 鼠标死区与目标切换机制 (Mouse Deadzone & Switch Logic) ---
         float curYaw = isShoulder ? ShoulderSurfingCompat.getCameraYaw() : player.getYRot();
@@ -775,6 +868,23 @@ public class ClientEvents {
             // 未剔除时，压枪/吸附每帧的自转会被当成玩家甩枪 → userDamping 被自己压低 → 自阻尼闭环。
             float mouseDeltaYaw = Mth.wrapDegrees(curYaw - lastLockedYaw) - selfAppliedYaw;
             float mouseDeltaPitch = (curPitch - lastLockedPitch) - selfAppliedPitch;
+
+            // 自瞄是否正在主动追踪目标：上一帧仍有未完成的追踪缺口，或本帧已写入可观转动量。
+            boolean aimTrackingBusy =
+                    Math.abs(lastAimTrackingGapYaw) > AIM_TRACKING_BUSY_DEG
+                            || Math.abs(lastAimTrackingGapPitch) > AIM_TRACKING_BUSY_DEG
+                            || Math.abs(selfAppliedYaw) > AIM_TRACKING_BUSY_DEG
+                            || Math.abs(selfAppliedPitch) > AIM_TRACKING_BUSY_DEG;
+
+            // 自瞄正在追踪目标时，相机的转动主要由自瞄驱动而非玩家鼠标。
+            // 平滑跟踪必然存在「追赶滞后」——目标越快，滞后越大，残差也越大。
+            // 若把这份残差原样计入玩家偏转，就会出现「目标越快越容易越过死区而脱锁」。
+            // 注意不能整帧丢弃：那样自瞄一忙死区就永久失效，玩家将无法甩枪切目标/解锁。
+            // 故只对残差做限幅——保留玩家真实的大幅甩动，仅压制滞后造成的零头。
+            if (aimTrackingBusy) {
+                mouseDeltaYaw = Mth.clamp(mouseDeltaYaw, -DEADZONE_RESIDUAL_CLAMP_DEG, DEADZONE_RESIDUAL_CLAMP_DEG);
+                mouseDeltaPitch = Mth.clamp(mouseDeltaPitch, -DEADZONE_RESIDUAL_CLAMP_DEG, DEADZONE_RESIDUAL_CLAMP_DEG);
+            }
 
             // 累计玩家施加的鼠标偏转位移 (供"是否切换目标"判定，需要保持住)
             mouseDeflectionYaw += mouseDeltaYaw;
@@ -794,17 +904,27 @@ public class ClientEvents {
             double deflection = Math.hypot(mouseDeflectionYaw, mouseDeflectionPitch);
             double deadzoneThreshold = AutoAttackerConfig.LOCK_DEADZONE_THRESHOLD.get();
 
-            // 超过死区阈值：判定为玩家主动甩动准星切换目标
+            // 超过阈值：判定为玩家主动甩动准星切换目标。
+            // 切换门槛取死区的 1.6 倍：切换是重决策，若与普通死区同值，平滑跟踪的
+            // 微小残差就会频繁触发无意义的切换(切走又切回，来回乒乓)。
             long now = System.currentTimeMillis();
-            if (deflection >= deadzoneThreshold && (now - lastSwitchTime > 220L)) {
+            if (deflection >= deadzoneThreshold * TARGET_SWITCH_THRESHOLD_MULT && (now - lastSwitchTime > 220L)) {
                 ItemStack heldStack = getHeldBow(player);
                 boolean holdingBow = !heldStack.isEmpty();
                 double searchDist = (holdingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get())
                         ? Math.max(AutoAttackerConfig.AIM_ASSIST_RANGE.get(), AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get())
                         : AutoAttackerConfig.AIM_ASSIST_RANGE.get();
 
-                LivingEntity switchTarget = findSwitchTarget(player, target, searchDist, 75.0f);
-                if (switchTarget != null && switchTarget != target) {
+                // 「换一个目标」属于自动切换目标功能，必须由 enableAutoSwitchTarget 控制。
+                // 该开关关闭时不得把锁定换到别的目标上——否则玩家手动锁定的目标会被
+                // 旁边的敌人抢走。关闭时仅保留下方「甩脱解除锁定」，那才是玩家自己的操作。
+                LivingEntity switchTarget = AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()
+                        ? findSwitchTarget(player, target, searchDist, 75.0f)
+                        : null;
+                // 还需新目标确有收益才切：仅有「另一个可见目标」不足以构成切换理由，
+                // 否则残差触发时会切向一个明显更差的目标，随后又切回原目标(乒乓)。
+                if (switchTarget != null && switchTarget != target
+                        && switchYieldsGain(player, target, switchTarget, searchDist)) {
                     target = switchTarget;
                     currentTarget = switchTarget;
                     lastSwitchTime = now;
@@ -843,7 +963,11 @@ public class ClientEvents {
         AutoBallisticsTracker.BallisticsProfile profile = isHoldingBow ? AutoBallisticsTracker.getProfile(bowStack) : null;
 
         double targetDistXZ = Math.hypot(tx - px, tz - pz);
-        double baseTargetY = computeTargetY(target, partialTick, AutoAttackerConfig.TARGET_PART.get(), isGun, isHoldingBow, targetDistXZ);
+        double rawBaseTargetY = computeTargetY(target, partialTick, AutoAttackerConfig.TARGET_PART.get(), isGun, isHoldingBow, targetDistXZ);
+        // 部位锁定平滑：TARGET_PART 手动切换、或 ADAPTIVE 依距离自动换部位时，瞄准点会
+        // 发生阶跃。若直接采用新高度，视角会瞬间跳一下。这里对瞄准高度做限速收敛
+        // (slew-rate limiting)：每帧朝目标高度移动有限步长，切换看起来是平滑滑过去的。
+        double baseTargetY = smoothAimHeight(target, rawBaseTargetY, deltaSec);
 
         Vec3 eye = new Vec3(px, py, pz);
         Vec3 baseAimPoint = new Vec3(tx, baseTargetY, tz);
@@ -852,7 +976,7 @@ public class ClientEvents {
         double dY0 = baseTargetY - py;
         double dZ0 = tz - pz;
         double horizDist0 = Math.sqrt(dX0 * dX0 + dZ0 * dZ0);
-        float directYaw = (float) (Mth.atan2(dZ0, dX0) * (180D / Math.PI)) - 90.0F;
+        float directYaw = safeAimYaw(dX0, dZ0, player.getYRot());
         float directPitch = (float) -(Mth.atan2(dY0, horizDist0) * (180D / Math.PI));
 
         float destYaw = directYaw;
@@ -897,7 +1021,7 @@ public class ClientEvents {
             double cdy = finalTargetPoint.y - camPos.y;
             double cdz = finalTargetPoint.z - camPos.z;
             double cHoriz = Math.sqrt(cdx * cdx + cdz * cdz);
-            destCamYaw = (float) (Mth.atan2(cdz, cdx) * (180D / Math.PI)) - 90.0F;
+            destCamYaw = safeAimYaw(cdx, cdz, destYaw);
             destCamPitch = (float) -(Mth.atan2(cdy, cHoriz) * (180D / Math.PI));
 
             staticLastPredictedCamYaw = destCamYaw;
@@ -915,6 +1039,20 @@ public class ClientEvents {
             lastDestPitch = Float.NaN;
             lastDestCamYaw = Float.NaN;
             lastDestCamPitch = Float.NaN;
+            // 宽容期内不追踪目标，相机变化不应算作玩家甩枪。若保留上一帧的自转剔除量
+            // (selfAppliedYaw 可高达十余度)，恢复追踪的首帧会用陈旧基准相减，把这两帧的
+            // 全部真实位移误判为玩家主动甩脱 → 累计超过死区 → 无故解除锁定。
+            // SMOOTH 逐帧写入角度故必中此坑，HARD 在该模式下不经过本段所以不受影响。
+            selfAppliedYaw = 0f;
+            selfAppliedPitch = 0f;
+            lastAimTrackingGapYaw = 0f;
+            lastAimTrackingGapPitch = 0f;
+            // 同 currentTarget==null 分支：宽容期内不追踪，玩家偏转与上一帧锁定角一并清零，
+            // 避免这段"非追踪期"的残留跨到恢复之后影响死区判定。
+            mouseDeflectionYaw = 0f;
+            mouseDeflectionPitch = 0f;
+            lastLockedYaw = 0f;
+            lastLockedPitch = 0f;
             return;
         }
 
@@ -945,6 +1083,8 @@ public class ClientEvents {
             // HARD 强锁为瞬移分支，不参与阻尼计算；清零自身增量避免残留值污染后续 SMOOTH 帧
             selfAppliedYaw = 0f;
             selfAppliedPitch = 0f;
+            lastAimTrackingGapYaw = 0f;
+            lastAimTrackingGapPitch = 0f;
             wasLockedLastFrame = true;
             lastTrackedTarget = target;
             lastDestYaw = hardPlayerYaw;
@@ -976,6 +1116,15 @@ public class ClientEvents {
                 kinematicPlayerYaw = Mth.wrapDegrees(destYaw - lastDestYaw);
                 kinematicPlayerPitch = destPitch - lastDestPitch;
             }
+            // 前馈只应补偿「玩家自身走位」造成的目标相对角位移，量级为每秒几度。
+            // 目标自身快速移动（如从头顶飞过导致方位角瞬间翻转 180°）也会产生巨大
+            // 帧间差值，若原样前馈：相机会被推着一个跳变角度暴走，同时该值被记成
+            // 自瞄输出、下一帧与实际转过的角度对不上而产生残差 → 误判玩家甩枪 → 脱锁。
+            // 故对超出合理走位量级的差值一律不施加前馈（交给正常平滑回路收敛）。
+            if (Math.abs(kinematicCamYaw) > KINEMATIC_FEEDFORWARD_MAX_DEG) kinematicCamYaw = 0.0f;
+            if (Math.abs(kinematicCamPitch) > KINEMATIC_FEEDFORWARD_MAX_DEG) kinematicCamPitch = 0.0f;
+            if (Math.abs(kinematicPlayerYaw) > KINEMATIC_FEEDFORWARD_MAX_DEG) kinematicPlayerYaw = 0.0f;
+            if (Math.abs(kinematicPlayerPitch) > KINEMATIC_FEEDFORWARD_MAX_DEG) kinematicPlayerPitch = 0.0f;
         }
         lastTrackedTarget = target;
         lastDestYaw = destYaw;
@@ -1054,18 +1203,18 @@ public class ClientEvents {
                 // 导致「越远越需要压枪、实际却压不动」。改为「基准 + 增量」并只对增量设上限。
                 if (deltaCamX > 0) {
                     float add = Math.min(0.75f, 0.32f * recoilMult * smoothedRecoilBoost * distBoost * userDamping);
-                    factorPitch = Mth.clamp(baseFactor + add, baseFactor, 0.95f);
+                    factorPitch = Mth.clamp(baseFactor + add, baseFactor, Math.max(baseFactor, 0.95f));
                 } else {
                     float add = Math.min(0.45f, 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
-                    factorPitch = Mth.clamp(baseFactor + add, baseFactor, 0.95f);
+                    factorPitch = Mth.clamp(baseFactor + add, baseFactor, Math.max(baseFactor, 0.95f));
                 }
                 float addYaw = Math.min(0.55f, 0.25f * recoilMult * smoothedRecoilBoost * userDamping);
-                factorYaw = Mth.clamp(baseFactor + addYaw, baseFactor, 0.95f);
+                factorYaw = Mth.clamp(baseFactor + addYaw, baseFactor, Math.max(baseFactor, 0.95f));
             } else {
                 float add = Math.min(0.40f, 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
-                factorPitch = Mth.clamp(baseFactor + add, baseFactor, 0.95f);
+                factorPitch = Mth.clamp(baseFactor + add, baseFactor, Math.max(baseFactor, 0.95f));
                 float addYaw = Math.min(0.35f, 0.15f * recoilMult * smoothedRecoilBoost * userDamping);
-                factorYaw = Mth.clamp(baseFactor + addYaw, baseFactor, 0.95f);
+                factorYaw = Mth.clamp(baseFactor + addYaw, baseFactor, Math.max(baseFactor, 0.95f));
             }
         } else {
             smoothedRecoilBoost = 0.0f;
@@ -1127,7 +1276,7 @@ public class ClientEvents {
             double pdy = crosshairWorldPoint.y - eye.y;
             double pdz = crosshairWorldPoint.z - eye.z;
             double pHoriz = Math.sqrt(pdx * pdx + pdz * pdz);
-            newPlayerYaw = (float) (Mth.atan2(pdz, pdx) * (180D / Math.PI)) - 90.0F;
+            newPlayerYaw = safeAimYaw(pdx, pdz, curPlayerYaw);
             float rawPlayerPitch = (float) -(Mth.atan2(pdy, pHoriz) * (180D / Math.PI));
 
             // 若使用具备弹道重力下坠的抛物线武器 (非直瞄枪械)，叠加上弹道解算所得的抛物线仰角补偿
@@ -1160,7 +1309,25 @@ public class ClientEvents {
 
         lastLockedYaw = finalYaw;
         lastLockedPitch = finalPitch;
+        // 记录本帧剩余未完成的追踪缺口，供下一帧判定相机转动是否由自瞄主导。
+        lastAimTrackingGapYaw = deltaCamY;
+        lastAimTrackingGapPitch = deltaCamX;
         wasLockedLastFrame = true;
+    }
+
+    /**
+     * 安全的水平方位角计算。
+     *
+     * atan2(dz, dx) 在水平偏移趋近 0 (目标几乎在正下方/正上方) 时退化为任意值 ——
+     * 例如 dx=0.4, dz=0 时恒得 0°，减 90 后固定为 -90°，与目标真实方位无关。
+     * 这会让 destYaw 突然甩向无关方向、准星偏离目标被判为跟丢。
+     *
+     * @param fallbackYaw 水平偏移过小时沿用的偏航角 (通常是当前实际视角)
+     */
+    private static float safeAimYaw(double dx, double dz, float fallbackYaw) {
+        double horiz = Math.sqrt(dx * dx + dz * dz);
+        if (horiz < 0.05D) return fallbackYaw;
+        return (float) (Mth.atan2(dz, dx) * (180D / Math.PI)) - 90.0F;
     }
 
     private LivingEntity getClosestTargetInFOV(Player player, double range, float maxAngle) {
@@ -1188,7 +1355,7 @@ public class ClientEvents {
      *
      * @param isShoulder 当前是否第三人称越肩
      */
-    private void updateSwapTransit(Player player, boolean isShoulder) {
+    private void updateSwapTransit(Player player) {
         ItemStack held = player.getMainHandItem();
 
         // 仅比较物品与 NBT，忽略堆叠数量 (丢弃/拾取同类物品不应触发过渡)
@@ -1201,7 +1368,9 @@ public class ClientEvents {
 
         swapTransit.active = true;
         swapTransit.startNanos = System.nanoTime();
-        // 起点取"此刻的实际朝向"，保证视觉上从当前位置开始滑动
+        // 起点取"此刻的实际朝向"，保证视觉上从当前位置开始滑动。
+        // isShoulder 在此处才查询：未换武器时无需探测人称，避免每帧一次反射查询。
+        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
         if (isShoulder) {
             swapTransit.curYaw = ShoulderSurfingCompat.getCameraYaw();
             swapTransit.curPitch = ShoulderSurfingCompat.getCameraPitch();
@@ -1293,20 +1462,19 @@ public class ClientEvents {
                 e -> isValidTarget(player, e));
 
         LivingEntity bestEntity = null;
-        double bestDistSqr = Double.MAX_VALUE;
 
+        // 先收集「准星命中盒」的候选及其距离 (廉价几何计算)，排序后只对最近的前若干个
+        // 做视线检测。此前对每个候选都调 hasLineOfSightMultiPoint(最坏 4 次射线)，
+        // 且在两个分支里重复调用。
+        List<Candidate> hits = new java.util.ArrayList<>();
         for (LivingEntity entity : entities) {
             // Hitbox 稍微 inflate 0.15D，让准星手感更舒适自然
             AABB aabb = entity.getBoundingBox().inflate(0.15D);
             Optional<Vec3> hit = aabb.clip(eyePos, endPos);
             if (hit.isPresent()) {
-                double distSqr = eyePos.distanceToSqr(hit.get());
-                if (distSqr < bestDistSqr && hasLineOfSightMultiPoint(player, entity)) {
-                    bestDistSqr = distSqr;
-                    bestEntity = entity;
-                }
+                hits.add(new Candidate(entity, 0.0D, eyePos.distanceToSqr(hit.get()), 0.0D, true));
             } else {
-                // 如果距离稍远，角度在极小容差内且在视线内也算作指向
+                // 如果距离稍远，角度在极小容差内也算作指向候选
                 double dX = entity.getX() - eyePos.x;
                 double dY = (entity.getY() + entity.getBbHeight() * 0.5D) - eyePos.y;
                 double dZ = entity.getZ() - eyePos.z;
@@ -1316,13 +1484,42 @@ public class ClientEvents {
                     double angle = Math.acos(Mth.clamp(dot, -1.0, 1.0)) * (180.0 / Math.PI);
                     // 视线张角：距离越远允许的容差越紧致
                     double allowedAngle = Math.max(1.8, Math.min(4.5, 20.0 / length));
-                    if (angle <= allowedAngle && hasLineOfSightMultiPoint(player, entity)) {
-                        double distSqr = player.distanceToSqr(entity);
-                        if (distSqr < bestDistSqr) {
-                            bestDistSqr = distSqr;
-                            bestEntity = entity;
-                        }
+                    if (angle <= allowedAngle) {
+                        hits.add(new Candidate(entity, angle, player.distanceToSqr(entity), 0.0D));
                     }
+                }
+            }
+        }
+
+        if (hits.isEmpty()) return null;
+
+        // 命中盒相交者优先 (距离即射线命中距)，其次按与准星夹角
+        hits.sort((a, b) -> {
+            if (a.hitbox != b.hitbox) return a.hitbox ? -1 : 1;
+            if (a.hitbox) return Double.compare(a.distSqr, b.distSqr);
+            return Double.compare(a.angle, b.angle);
+        });
+
+        int limit = Math.min(hits.size(), MAX_SWITCH_CANDIDATE_SCANS);
+        double bestDistSqr = Double.MAX_VALUE;
+        for (int i = 0; i < limit; i++) {
+            Candidate c = hits.get(i);
+            if (!hasLineOfSightMultiPoint(player, c.entity)) continue;
+            if (c.distSqr < bestDistSqr) {
+                bestDistSqr = c.distSqr;
+                bestEntity = c.entity;
+            }
+        }
+
+        // 兜底：前若干个候选都被遮挡时，才回退到全量扫描，保证不因候选上限而漏掉可见目标。
+        // 该路径仅在「准星附近存在多个候选但最近者全被挡住」时触发，属罕见情况。
+        if (bestEntity == null && hits.size() > limit) {
+            for (int i = limit; i < hits.size(); i++) {
+                Candidate c = hits.get(i);
+                if (!hasLineOfSightMultiPoint(player, c.entity)) continue;
+                if (c.distSqr < bestDistSqr) {
+                    bestDistSqr = c.distSqr;
+                    bestEntity = c.entity;
                 }
             }
         }
@@ -1343,9 +1540,10 @@ public class ClientEvents {
                 e -> e != excludeTarget && isValidTarget(player, e));
 
         double rangeSqr = range * range;
-        LivingEntity bestEntity = null;
-        double bestScore = -Double.MAX_VALUE;
 
+        // 与 findSwitchTarget 同理：先做廉价的角度筛选，按夹角升序后只对最靠近准星的
+        // 前若干个做视线检测，避免在大范围搜索时逐一对全部实体做昂贵射线检测。
+        List<Candidate> candidates = new java.util.ArrayList<>();
         for (LivingEntity entity : entities) {
             double distSqr = player.distanceToSqr(entity);
             if (distSqr > rangeSqr) continue;
@@ -1360,29 +1558,102 @@ public class ClientEvents {
             double angle = Math.acos(Mth.clamp(alignment, -1.0, 1.0)) * (180.0 / Math.PI);
             if (angle > maxAngle) continue;
 
-            if (!hasLineOfSightMultiPoint(player, entity)) continue;
+            candidates.add(new Candidate(entity, angle, distSqr, alignment));
+        }
 
-            double score = 0.0;
-            switch (priority) {
-                case FOV -> {
-                    double normDist = Math.sqrt(distSqr) / range;
-                    score = alignment - 0.15D * normDist;
-                }
-                case DISTANCE -> {
-                    score = -Math.sqrt(distSqr);
-                }
-                case HEALTH -> {
-                    score = -entity.getHealth();
-                }
-            }
+        if (candidates.isEmpty()) return null;
 
+        // DISTANCE / HEALTH 优先级与夹角无关，须全量评估；FOV 优先级则按夹角取前若干个。
+        if (priority == AutoAttackerConfig.SwitchPriority.FOV) {
+            candidates.sort((a, b) -> Double.compare(a.angle, b.angle));
+        }
+        int limit = (priority == AutoAttackerConfig.SwitchPriority.FOV)
+                ? Math.min(candidates.size(), MAX_SWITCH_CANDIDATE_SCANS)
+                : candidates.size();
+
+        LivingEntity bestEntity = null;
+        double bestScore = -Double.MAX_VALUE;
+
+        for (int i = 0; i < limit; i++) {
+            Candidate c = candidates.get(i);
+            if (!hasLineOfSightMultiPoint(player, c.entity)) continue;
+
+            double score = scoreCandidate(c, range, priority);
             if (score > bestScore) {
                 bestScore = score;
-                bestEntity = entity;
+                bestEntity = c.entity;
+            }
+        }
+
+        // 兜底：FOV 优先级下若前若干个候选都被遮挡，回退扫描其余候选，
+        // 避免候选上限导致本来可见的目标被漏掉。
+        if (bestEntity == null && limit < candidates.size()) {
+            for (int i = limit; i < candidates.size(); i++) {
+                Candidate c = candidates.get(i);
+                if (!hasLineOfSightMultiPoint(player, c.entity)) continue;
+                double score = scoreCandidate(c, range, priority);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestEntity = c.entity;
+                }
             }
         }
 
         return bestEntity;
+    }
+
+    /** 按选定优先级为候选打分 (与选择逻辑同源)。 */
+    private static double scoreCandidate(Candidate c, double range, AutoAttackerConfig.SwitchPriority priority) {
+        return switch (priority) {
+            case FOV -> c.alignment - 0.15D * (Math.sqrt(c.distSqr) / range);
+            case DISTANCE -> -Math.sqrt(c.distSqr);
+            case HEALTH -> -c.entity.getHealth();
+        };
+    }
+
+    /**
+     * 在视野内挑选一个「确实优于当前目标」的候选，用于自动转火。
+     *
+     * 与 getPrioritizedTarget 的区别：除非当前目标已经不可用(死亡/消失)，否则候选必须
+     * 在评分上明显超出当前目标才返回。否则返回 null(保持原锁定)，避免仅仅因为
+     * 旁边出现了另一个可见目标就把锁定换走。
+     */
+    private LivingEntity pickBetterTarget(Player player, LivingEntity current, double range, float maxAngle) {
+        LivingEntity candidate = getPrioritizedTarget(player, range, maxAngle,
+                AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), current);
+        if (candidate == null) return null;
+        if (current == null || current.isRemoved() || !current.isAlive()) return candidate;
+        return switchYieldsGain(player, current, candidate, range) ? candidate : null;
+    }
+
+    /**
+     * 判断切到新目标是否确有收益：新目标评分必须超出原目标一个明显幅度。
+     * 仅「存在另一个可见目标」不构成切换理由 —— 否则残差误触发死区时会切向
+     * 一个明显更差的目标，随后残差再次触发又切回原目标，形成来回乒乓。
+     */
+    private boolean switchYieldsGain(Player player, LivingEntity current, LivingEntity candidate, double range) {
+        if (current == null || current.isRemoved() || !current.isAlive()) return true;
+        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
+        Vec3 eyePos = isShoulder ? ShoulderSurfingCompat.getCameraPosition() : player.getEyePosition();
+        Vec3 lookVec = isShoulder ? ShoulderSurfingCompat.getCameraLookVector() : player.getViewVector(1.0F);
+        double curScore = scoreTarget(player, current, eyePos, lookVec, range);
+        double newScore = scoreTarget(player, candidate, eyePos, lookVec, range);
+        return newScore > curScore + TARGET_SWITCH_GAIN_MARGIN;
+    }
+
+    /**
+     * 目标评分 (与 findSwitchTarget 内部一致)：对齐度为主权重，距离为次权重。
+     * 供「切换是否值得」比较使用。
+     */
+    private double scoreTarget(Player player, LivingEntity entity, Vec3 eyePos, Vec3 lookVec, double range) {
+        double dX = entity.getX() - eyePos.x;
+        double dY = (entity.getY() + entity.getBbHeight() * 0.5D) - eyePos.y;
+        double dZ = entity.getZ() - eyePos.z;
+        double length = Math.sqrt(dX * dX + dY * dY + dZ * dZ);
+        if (length <= 0.0001D) return -Double.MAX_VALUE;
+        double alignment = (dX * lookVec.x + dY * lookVec.y + dZ * lookVec.z) / length;
+        double normDist = player.distanceToSqr(entity) <= 0 ? 0 : Math.sqrt(player.distanceToSqr(entity)) / range;
+        return alignment * 2.5D - 0.25D * normDist;
     }
 
     private LivingEntity findSwitchTarget(Player player, LivingEntity excludeTarget, double range, float maxAngle) {
@@ -1395,9 +1666,12 @@ public class ClientEvents {
             e -> e != excludeTarget && isValidTarget(player, e));
 
         double rangeSqr = range * range;
-        LivingEntity bestEntity = null;
-        double bestScore = -Double.MAX_VALUE;
 
+        // 先用廉价的角度/距离计算筛出候选，按与准星的夹角排序，只对最靠近准星的前若干个
+        // 做视线检测。视线检测每次最多 4 次 level().clip，是全链路最贵的操作；此前对每个
+        // 通过角度过滤的实体都做一次，搜索范围 120 格时单帧可达上千次射线检测。
+        // 切换目标本质是「挑最靠近准星的那个」，无需对全部候选逐一验证视线。
+        List<Candidate> candidates = new java.util.ArrayList<>();
         for (LivingEntity entity : entities) {
             double distSqr = player.distanceToSqr(entity);
             if (distSqr > rangeSqr) continue;
@@ -1412,19 +1686,66 @@ public class ClientEvents {
             double angle = Math.acos(Mth.clamp(alignment, -1.0, 1.0)) * (180.0 / Math.PI);
             if (angle > maxAngle) continue;
 
-            if (!hasLineOfSightMultiPoint(player, entity)) continue;
+            candidates.add(new Candidate(entity, angle, distSqr, alignment));
+        }
 
-            // 优先选择最接近当前甩动朝向的目标 (对齐度高权重，距离低权重)
-            double normDist = Math.sqrt(distSqr) / range;
-            double score = alignment * 2.5D - 0.25D * normDist;
+        if (candidates.isEmpty()) return null;
+
+        candidates.sort((a, b) -> Double.compare(a.angle, b.angle));
+        int limit = Math.min(candidates.size(), MAX_SWITCH_CANDIDATE_SCANS);
+
+        LivingEntity bestEntity = null;
+        double bestScore = -Double.MAX_VALUE;
+        for (int i = 0; i < limit; i++) {
+            Candidate c = candidates.get(i);
+            if (!hasLineOfSightMultiPoint(player, c.entity)) continue;
+
+            double normDist = Math.sqrt(c.distSqr) / range;
+            double score = c.alignment * 2.5D - 0.25D * normDist;
 
             if (score > bestScore) {
                 bestScore = score;
-                bestEntity = entity;
+                bestEntity = c.entity;
+            }
+        }
+
+        // 兜底：最靠近准星的若干个都被遮挡时，回退扫描其余候选，避免候选上限导致漏掉可见目标。
+        if (bestEntity == null && candidates.size() > limit) {
+            for (int i = limit; i < candidates.size(); i++) {
+                Candidate c = candidates.get(i);
+                if (!hasLineOfSightMultiPoint(player, c.entity)) continue;
+                double normDist = Math.sqrt(c.distSqr) / range;
+                double score = c.alignment * 2.5D - 0.25D * normDist;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestEntity = c.entity;
+                }
             }
         }
 
         return bestEntity;
+    }
+
+    /** 切换/选中目标的候选记录 (实体 + 预计算的角度/距离/对齐度)。 */
+    private static final class Candidate {
+        final LivingEntity entity;
+        final double angle;
+        final double distSqr;
+        final double alignment;
+        /** 是否为准星命中盒相交 (优先于纯角度接近)。 */
+        final boolean hitbox;
+
+        Candidate(LivingEntity entity, double angle, double distSqr, double alignment) {
+            this(entity, angle, distSqr, alignment, false);
+        }
+
+        Candidate(LivingEntity entity, double angle, double distSqr, double alignment, boolean hitbox) {
+            this.entity = entity;
+            this.angle = angle;
+            this.distSqr = distSqr;
+            this.alignment = alignment;
+            this.hitbox = hitbox;
+        }
     }
 
     /**
@@ -1435,15 +1756,20 @@ public class ClientEvents {
      *                验视线却用实体眼睛"的基准错配，导致越肩视角下目标刚锁上就掉。
      */
     private static boolean hasLineOfSightFrom(Player player, LivingEntity target, Vec3 viewPos) {
+        boolean eyeBased = viewPos == null || viewPos.distanceToSqr(player.getEyePosition()) < 1.0E-6D;
+        // player.hasLineOfSight 就是「眼睛→目标眼睛」的一次 raycast。
+        // 当视点即玩家眼睛时，它已覆盖下方的检测点 1，命中即返回，避免重复一次 raycast。
         if (player.hasLineOfSight(target)) return true;
 
         Vec3 eye = viewPos != null ? viewPos : player.getEyePosition();
         AABB bb = target.getBoundingBox();
 
-        // 1. 眼睛部位点
-        Vec3 headEyePos = target.getEyePosition();
-        if (player.level().clip(new ClipContext(eye, headEyePos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() == HitResult.Type.MISS) {
-            return true;
+        // 1. 眼睛部位点 (仅当视点不是玩家眼睛时才有别于 player.hasLineOfSight，需显式检测)
+        if (!eyeBased) {
+            Vec3 headEyePos = target.getEyePosition();
+            if (player.level().clip(new ClipContext(eye, headEyePos, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() == HitResult.Type.MISS) {
+                return true;
+            }
         }
 
         // 2. Hitbox 中心点
@@ -1463,12 +1789,27 @@ public class ClientEvents {
         return player.level().clip(new ClipContext(eye, waist, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() == HitResult.Type.MISS;
     }
 
-    /** 按当前人称自动选取视线基准 (越肩用相机，否则用眼睛) */
+    /**
+     * 按当前人称选取视线基准。
+     *
+     * 注意：不能只在「相机」与「眼睛」之间二选一 —— 第三人称相机位于玩家后上方，
+     * 大俯角(如目标在脚下)时相机到目标的射线会穿过玩家自身或脚下方块，
+     * 导致明明可见却判定无视线而脱锁。这里两个基准都试，任一通路即算有视线。
+     */
     private static boolean hasLineOfSightMultiPoint(Player player, LivingEntity target) {
-        Vec3 viewPos = ShoulderSurfingCompat.isShoulderSurfing()
-                ? ShoulderSurfingCompat.getCameraPosition()
-                : player.getEyePosition();
-        return hasLineOfSightFrom(player, target, viewPos);
+        // 先试实体眼睛 (稳定的基础基准)
+        Vec3 eyePos = player.getEyePosition();
+        if (hasLineOfSightFrom(player, target, eyePos)) {
+            return true;
+        }
+        // 第三人称下再试相机视点 (覆盖越肩视角的准星指向)
+        if (ShoulderSurfingCompat.isShoulderSurfing()) {
+            Vec3 camPos = ShoulderSurfingCompat.getCameraPosition();
+            if (camPos != null && camPos.distanceToSqr(eyePos) > 1.0E-4) {
+                return hasLineOfSightFrom(player, target, camPos);
+            }
+        }
+        return false;
     }
 
     public static final TagKey<Item> FORGE_BOWS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:tools/bows"));
@@ -1606,7 +1947,7 @@ public class ClientEvents {
         Vec3 effectiveVel = targetVel;
         double baseTotalDist = eye.distanceTo(baseAimPoint);
         double baseHorizDist = Math.sqrt((baseAimPoint.x - eye.x) * (baseAimPoint.x - eye.x) + (baseAimPoint.z - eye.z) * (baseAimPoint.z - eye.z));
-        float baseDirectYaw = (float) (Mth.atan2(baseAimPoint.z - eye.z, baseAimPoint.x - eye.x) * (180D / Math.PI)) - 90.0F;
+        float baseDirectYaw = safeAimYaw(baseAimPoint.x - eye.x, baseAimPoint.z - eye.z, player.getYRot());
         float baseDirectPitch = (float) -(Mth.atan2(baseAimPoint.y - eye.y, Math.max(0.1, baseHorizDist)) * (180D / Math.PI));
 
         boolean isFlying = target instanceof net.minecraft.world.entity.FlyingMob
@@ -1627,7 +1968,7 @@ public class ClientEvents {
                 futureY += effectiveVel.y * flightTime;
             }
 
-            float straightYaw = (float) (Mth.atan2(futureZ - eye.z, futureX - eye.x) * (180D / Math.PI)) - 90.0F;
+            float straightYaw = safeAimYaw(futureX - eye.x, futureZ - eye.z, player.getYRot());
             float straightPitch = (float) -(Mth.atan2(futureY - eye.y, Math.hypot(futureX - eye.x, futureZ - eye.z)) * (180D / Math.PI));
 
             return new PredictedAim(new Vec3(futureX, futureY, futureZ), straightYaw, straightPitch, flightTime);
@@ -1693,7 +2034,7 @@ public class ClientEvents {
         double dx = targetPoint.x - eye.x;
         double dz = targetPoint.z - eye.z;
         double horizDist = Math.sqrt(dx * dx + dz * dz);
-        float targetYaw = (float) (Mth.atan2(dz, dx) * (180D / Math.PI)) - 90.0F;
+        float targetYaw = safeAimYaw(dx, dz, player.getYRot());
 
         float targetPitch;
         if (bestTraj != null && bestTraj.reachable) {
@@ -1723,13 +2064,18 @@ public class ClientEvents {
 
         LivingEntity locked = getCurrentTarget();
         if (locked != null && locked.isAlive() && !locked.isRemoved() && !AutoAttackerConfig.excludedEntities.contains(locked.getType())) {
-            double reach = 4.5D;
-            if (player.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get()) != null) {
-                reach = player.getAttributeValue(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get());
-            }
+            // 属性查询只为取 reach：一次取得 Holder 即可，无需再查一遍属性表。
+            var reachAttr = player.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get());
+            double reach = (reachAttr != null) ? reachAttr.getValue() : 4.5D;
             if (player.distanceToSqr(locked) <= reach * reach) {
+                // 近身攻击实体：不发空挥通知。Botania 系武器的剑气只在原版判定为
+                // 「空挥」(LeftClickEmpty，即准星未命中任何实体)时才生成；
+                // 打实体时补发通知会导致近身战斗也冒光束，与武器原本语义不符。
                 gameMode.attack(player, locked);
                 player.swing(InteractionHand.MAIN_HAND);
+                // 攻击后重置蓄力 ticker：否则 getAttackStrengthScale 恒为 1.0，
+                // 攻击将不再受武器攻速节流(退化为每 tick 连击)。
+                player.resetAttackStrengthTicker();
                 return;
             }
         }
@@ -1740,12 +2086,17 @@ public class ClientEvents {
             if (AutoAttackerConfig.excludedEntities.contains(target.getType())) {
                 return;
             }
+            // 同样：命中实体时不发空挥通知。
             gameMode.attack(player, target);
             player.swing(InteractionHand.MAIN_HAND);
-        } else {
             player.resetAttackStrengthTicker();
+        } else {
+            // 纯空挥：这才是 Botania 系剑气唯一应触发的情形。
+            // 先发通知(此时服务端蓄力仍为满值，能通过其 attackStrength == 1.0 校验)，
+            // 再重置客户端蓄力 ticker 使攻击受攻速节流。
             ForgeHooks.onEmptyLeftClick(player);
             player.swing(InteractionHand.MAIN_HAND);
+            player.resetAttackStrengthTicker();
         }
     }
 
@@ -1796,6 +2147,57 @@ public class ClientEvents {
                 }
             }
         }
+    }
+
+    /**
+     * 瞄准高度的限速平滑 (Slew-Rate Limiting)。
+     *
+     * 用于部位锁定切换：TARGET_PART 在 HEAD/TORSO/ADAPTIVE 间切换时，或 ADAPTIVE 因
+     * 距离越过阈值而自动换部位时，computeTargetY 的返回值会阶跃。直接采用会让视角跳变；
+     * 此处每帧朝新高度移动有限步长，使切换呈现为平滑滑动。
+     *
+     * 不做「固定起点 + 曲线插值」：那会在过渡期间脱离目标实际高度，目标移动时准星失准。
+     * 这里每帧都以最新目标高度为收敛点，只限制单帧变化量。
+     *
+     * @param target       当前锁定目标 (变更时立即重置，避免跨目标滑动)
+     * @param rawHeight    computeTargetY 算出的本帧目标高度
+     * @param deltaSec     帧间隔(秒)
+     */
+    private double smoothAimHeight(LivingEntity target, double rawHeight, float deltaSec) {
+        return smoothAimHeight(target, rawHeight, deltaSec, true);
+    }
+
+    /**
+     * @param advance 是否推进平滑状态。渲染帧传 true(每帧迭代一次)；
+     *                同一渲染帧内的其它读取方(tick 阶段的射箭路径)传 false，
+     *                只取当前平滑值，避免以不同步长二次推进导致收敛速率翻倍。
+     */
+    private double smoothAimHeight(LivingEntity target, double rawHeight, float deltaSec, boolean advance) {
+        if (smoothedAimHeightTarget != target) {
+            // 换了目标：直接从该目标的实际高度起步，不做跨目标滑移
+            smoothedAimHeightTarget = target;
+            smoothedAimHeight = rawHeight;
+            return rawHeight;
+        }
+        if (Double.isNaN(smoothedAimHeight)) {
+            smoothedAimHeight = rawHeight;
+            return rawHeight;
+        }
+        if (!advance) {
+            return smoothedAimHeight;
+        }
+
+        float dt = (deltaSec > 0f && deltaSec <= 0.25f) ? deltaSec : (1.0f / 60.0f);
+        // 每秒最多移动的高度(格/秒)。取值需在「切换肉眼可辨」与「不拖沓」之间平衡：
+        // 1.8 格/秒下，头↔躯干(约 0.5~1.0 格)约 0.3~0.6 秒走完。
+        double maxStep = AIM_HEIGHT_SMOOTH_RATE * dt;
+        double diff = rawHeight - smoothedAimHeight;
+        if (Math.abs(diff) <= maxStep) {
+            smoothedAimHeight = rawHeight;
+        } else {
+            smoothedAimHeight += Math.signum(diff) * maxStep;
+        }
+        return smoothedAimHeight;
     }
 
     public static boolean isHoldingWeapon(Player player) {
