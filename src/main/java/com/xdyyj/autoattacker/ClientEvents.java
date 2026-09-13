@@ -79,6 +79,10 @@ public class ClientEvents {
     // --- 鼠标死区与目标切换机制 (Mouse Deadzone & Flick Switch) ---
     private float mouseDeflectionYaw = 0f;
     private float mouseDeflectionPitch = 0f;
+    // 鼠标瞬时活跃度：与上面的累积甩枪量相互独立。
+    // 累积量用于「是否切换目标」的判定（需要保持住），
+    // 活跃度用于「压枪阻尼」（需要快速衰减），二者语义相反，故分开维护。
+    private float mouseActivity = 0f;
     private long lastSwitchTime = 0L;
     private float lastLockedYaw = 0f;
     private float lastLockedPitch = 0f;
@@ -195,6 +199,7 @@ public class ClientEvents {
         velSampleCount = 0;
         mouseDeflectionYaw = 0f;
         mouseDeflectionPitch = 0f;
+        mouseActivity = 0f;
         for (int i = 0; i < VEL_SAMPLE_CAP; i++) {
             velSamples[i] = Vec3.ZERO;
         }
@@ -771,7 +776,7 @@ public class ClientEvents {
             float mouseDeltaYaw = Mth.wrapDegrees(curYaw - lastLockedYaw) - selfAppliedYaw;
             float mouseDeltaPitch = (curPitch - lastLockedPitch) - selfAppliedPitch;
 
-            // 累计玩家施加的鼠标偏转位移
+            // 累计玩家施加的鼠标偏转位移 (供"是否切换目标"判定，需要保持住)
             mouseDeflectionYaw += mouseDeltaYaw;
             mouseDeflectionPitch += mouseDeltaPitch;
 
@@ -779,6 +784,12 @@ public class ClientEvents {
             float decay = (float) Math.exp(-deltaSec * 6.5f);
             mouseDeflectionYaw *= decay;
             mouseDeflectionPitch *= decay;
+
+            // 独立的瞬时活跃度 (供压枪阻尼)：本帧鼠标位移取峰值后快速衰减 (半衰期约 60ms)。
+            // 与累积量分离后，一次甩枪不会长时间压制压枪强度，手指微抖也不会被累计成大位移。
+            float instant = (float) Math.hypot(mouseDeltaYaw, mouseDeltaPitch) * 20.0f; // 折算为近似"度/秒"量级
+            float activityDecay = (float) Math.exp(-deltaSec * 11.5f);
+            mouseActivity = Math.max(instant, mouseActivity * activityDecay);
 
             double deflection = Math.hypot(mouseDeflectionYaw, mouseDeflectionPitch);
             double deadzoneThreshold = AutoAttackerConfig.LOCK_DEADZONE_THRESHOLD.get();
@@ -799,6 +810,7 @@ public class ClientEvents {
                     lastSwitchTime = now;
                     mouseDeflectionYaw = 0f;
                     mouseDeflectionPitch = 0f;
+                    mouseActivity = 0f;
                     TacticalDebugPanel.setStatus("切换锁定: " + switchTarget.getType().getDescription().getString());
                 } else if (deflection >= deadzoneThreshold * 2.5) {
                     // 若无其他目标且强力甩开视角 (>2.5倍阈值)，解脱锁定并给予静默期
@@ -807,6 +819,7 @@ public class ClientEvents {
                     lastSwitchTime = now + 600L; // 给予 600ms 静默期，防止瞬间重新锁回
                     mouseDeflectionYaw = 0f;
                     mouseDeflectionPitch = 0f;
+                    mouseActivity = 0f;
                     wasLockedLastFrame = false;
                     TacticalDebugPanel.setStatus("甩脱视角: 已解除锁定");
                     return;
@@ -1018,6 +1031,10 @@ public class ClientEvents {
         float factorPitch = baseFactor;
         float factorYaw = baseFactor;
 
+        // 压枪段在「锁定」与「未锁定」下均生效。
+        // 锁定状态不会自动补足后坐力：computeTargetY 只决定瞄准点(头部/躯干)，
+        // 而锁定回路的刚度由 baseFactor(aimAssistSpeed) 决定，远距离下不足以压住后坐力，
+        // 因此需要压枪段额外抬高刚度。二者是叠加关系，不是替代关系。
         if (isGun && AutoAttackerConfig.ENABLE_ANTI_RECOIL.get()) {
             float targetRecoil = isGunFiring ? 1.0f : 0.0f;
             float lerpRate = isGunFiring ? (deltaSec * 18.0f) : (deltaSec * 9.0f);
@@ -1025,22 +1042,30 @@ public class ClientEvents {
 
             float recoilMult = (float) AutoAttackerConfig.ANTI_RECOIL_STRENGTH.get().doubleValue();
 
-            // 玩家手动甩动/拉枪阻尼：若检测到玩家主动移动鼠标偏转视角，按位移幅度动态削减压枪下压刚度，绝不跟玩家手感抢夺控制权
-            double userDeflection = Math.hypot(mouseDeflectionYaw, mouseDeflectionPitch);
-            float userDamping = (float) Mth.clamp(1.0 - (userDeflection / 10.0), 0.2, 1.0);
+            // 玩家手动甩动/拉枪阻尼：若检测到玩家正在主动移动鼠标，按瞬时活跃度动态削减压枪下压刚度，
+            // 绝不跟玩家手感抢夺控制权。使用独立的瞬时活跃度 (半衰期 ~60ms) 而非累积甩枪量，
+            // 避免一次甩枪后压枪被长时间压制，也避免手指微抖被累计成大位移而误削压枪。
+            float userDamping = (float) Mth.clamp(1.0 - (mouseActivity / 120.0), 0.25, 1.0);
 
             // 当枪械处于射击状态时：平衡水平与垂直追踪刚度，避免俯仰角极速收敛而偏航角严重滞后导致斜向偏右上
             if (isGunFiring) {
                 float distBoost = (float) Mth.clamp(targetDistXZ / 30.0, 1.0, 2.0);
+                // 上限必须随 baseFactor 放开：固定上限会在远距离(叠加 distBoost 后)被触顶截断，
+                // 导致「越远越需要压枪、实际却压不动」。改为「基准 + 增量」并只对增量设上限。
                 if (deltaCamX > 0) {
-                    factorPitch = Math.min(0.85f, baseFactor + 0.32f * recoilMult * smoothedRecoilBoost * distBoost * userDamping);
+                    float add = Math.min(0.75f, 0.32f * recoilMult * smoothedRecoilBoost * distBoost * userDamping);
+                    factorPitch = Mth.clamp(baseFactor + add, baseFactor, 0.95f);
                 } else {
-                    factorPitch = Math.min(0.65f, baseFactor + 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
+                    float add = Math.min(0.45f, 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
+                    factorPitch = Mth.clamp(baseFactor + add, baseFactor, 0.95f);
                 }
-                factorYaw = Math.min(0.75f, baseFactor + 0.25f * recoilMult * smoothedRecoilBoost * userDamping);
+                float addYaw = Math.min(0.55f, 0.25f * recoilMult * smoothedRecoilBoost * userDamping);
+                factorYaw = Mth.clamp(baseFactor + addYaw, baseFactor, 0.95f);
             } else {
-                factorPitch = Math.min(0.60f, baseFactor + 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
-                factorYaw = Math.min(0.60f, baseFactor + 0.15f * recoilMult * smoothedRecoilBoost * userDamping);
+                float add = Math.min(0.40f, 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
+                factorPitch = Mth.clamp(baseFactor + add, baseFactor, 0.95f);
+                float addYaw = Math.min(0.35f, 0.15f * recoilMult * smoothedRecoilBoost * userDamping);
+                factorYaw = Mth.clamp(baseFactor + addYaw, baseFactor, 0.95f);
             }
         } else {
             smoothedRecoilBoost = 0.0f;
@@ -1402,10 +1427,17 @@ public class ClientEvents {
         return bestEntity;
     }
 
-    private static boolean hasLineOfSightMultiPoint(Player player, LivingEntity target) {
+    /**
+     * 多点视线检测 (玩家眼睛 / 相机视点均可用)。
+     *
+     * @param viewPos 视线起点。第一人称传 player.getEyePosition()，
+     *                第三人称必须传相机位置 —— 否则会出现"选目标用相机射线、
+     *                验视线却用实体眼睛"的基准错配，导致越肩视角下目标刚锁上就掉。
+     */
+    private static boolean hasLineOfSightFrom(Player player, LivingEntity target, Vec3 viewPos) {
         if (player.hasLineOfSight(target)) return true;
 
-        Vec3 eye = player.getEyePosition();
+        Vec3 eye = viewPos != null ? viewPos : player.getEyePosition();
         AABB bb = target.getBoundingBox();
 
         // 1. 眼睛部位点
@@ -1429,6 +1461,14 @@ public class ClientEvents {
         // 4. 躯体腰部 (65% 高度)
         Vec3 waist = new Vec3(center.x, bb.minY + (bb.maxY - bb.minY) * 0.65, center.z);
         return player.level().clip(new ClipContext(eye, waist, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType() == HitResult.Type.MISS;
+    }
+
+    /** 按当前人称自动选取视线基准 (越肩用相机，否则用眼睛) */
+    private static boolean hasLineOfSightMultiPoint(Player player, LivingEntity target) {
+        Vec3 viewPos = ShoulderSurfingCompat.isShoulderSurfing()
+                ? ShoulderSurfingCompat.getCameraPosition()
+                : player.getEyePosition();
+        return hasLineOfSightFrom(player, target, viewPos);
     }
 
     public static final TagKey<Item> FORGE_BOWS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:tools/bows"));
