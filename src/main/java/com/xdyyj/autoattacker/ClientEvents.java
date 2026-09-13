@@ -83,6 +83,10 @@ public class ClientEvents {
     private float lastLockedYaw = 0f;
     private float lastLockedPitch = 0f;
     private boolean wasLockedLastFrame = false;
+    // 上一帧本模组自身写入的朝向增量。用于在统计"玩家手动偏转"时剔除自转，
+    // 否则压枪/吸附自己每帧转动的角度会被误计为玩家甩枪，形成自阻尼闭环。
+    private float selfAppliedYaw = 0f;
+    private float selfAppliedPitch = 0f;
 
     // --- 动态相对运动前馈补偿状态 (Dynamic Rotational Kinematic Feedforward) ---
     private LivingEntity lastTrackedTarget = null;
@@ -737,6 +741,8 @@ public class ClientEvents {
             lastTrackedTarget = null;
             lastDestYaw = Float.NaN;
             lastDestPitch = Float.NaN;
+            selfAppliedYaw = 0f;
+            selfAppliedPitch = 0f;
             com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
             return;
         }
@@ -744,7 +750,10 @@ public class ClientEvents {
         long now = System.nanoTime();
         float deltaSec = (lastAimFrameNanos == 0L) ? (1.0f / 60.0f) : (now - lastAimFrameNanos) / 1e9f;
         lastAimFrameNanos = now;
-        if (deltaSec <= 0f || deltaSec > 0.25f) deltaSec = 1.0f / 60.0f;
+        // 兜底语义：过小则视为 60fps 单帧；过大 (卡顿/加载) 应夹到 0.25s 上限而不是回退成 1/60，
+        // 否则"长时间停顿"会被当成"刚刚过去一帧"，平滑量停留在高位导致下一帧过冲。
+        if (!(deltaSec > 0f)) deltaSec = 1.0f / 60.0f;   // 含 NaN 判断
+        if (deltaSec > 0.25f) deltaSec = 0.25f;
 
         applyAimAssist(player, currentTarget, event.renderTickTime, deltaSec);
     }
@@ -757,8 +766,10 @@ public class ClientEvents {
         float curYaw = isShoulder ? ShoulderSurfingCompat.getCameraYaw() : player.getYRot();
         float curPitch = isShoulder ? ShoulderSurfingCompat.getCameraPitch() : player.getXRot();
         if (wasLockedLastFrame) {
-            float mouseDeltaYaw = Mth.wrapDegrees(curYaw - lastLockedYaw);
-            float mouseDeltaPitch = curPitch - lastLockedPitch;
+            // 剔除本模组上一帧自身写入的转动量：只有超出自身贡献的部分才是玩家真实鼠标输入。
+            // 未剔除时，压枪/吸附每帧的自转会被当成玩家甩枪 → userDamping 被自己压低 → 自阻尼闭环。
+            float mouseDeltaYaw = Mth.wrapDegrees(curYaw - lastLockedYaw) - selfAppliedYaw;
+            float mouseDeltaPitch = (curPitch - lastLockedPitch) - selfAppliedPitch;
 
             // 累计玩家施加的鼠标偏转位移
             mouseDeflectionYaw += mouseDeltaYaw;
@@ -918,6 +929,9 @@ public class ClientEvents {
 
             lastLockedYaw = hardCamYaw;
             lastLockedPitch = hardCamPitch;
+            // HARD 强锁为瞬移分支，不参与阻尼计算；清零自身增量避免残留值污染后续 SMOOTH 帧
+            selfAppliedYaw = 0f;
+            selfAppliedPitch = 0f;
             wasLockedLastFrame = true;
             lastTrackedTarget = target;
             lastDestYaw = hardPlayerYaw;
@@ -982,13 +996,23 @@ public class ClientEvents {
         }
 
         // 枪械后坐力抑制 (平滑连续阻尼 Anti-Recoil，消除高频抖动) 与机瞄感知 (ADS Sensing)
-        boolean isRelease = isGun && com.xdyyj.autoattacker.weapon.FirearmAdapter.isReleaseFire(com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(player.getMainHandItem()));
-        if (mc.options.keyAttack.isDown() && !isRelease) {
+        com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus gunStatus =
+                com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(player.getMainHandItem());
+        boolean isRelease = isGun && com.xdyyj.autoattacker.weapon.FirearmAdapter.isReleaseFire(gunStatus);
+
+        // 真实开火判据：必须同时满足「有开火输入」+「枪械确实能打出子弹」。
+        // 仅在按住左键就无条件视作开火，会让空仓 / 冷却 / 卡壳期间压枪持续满强度生效，
+        // 把准星一路压下压死。totalAmmo <= 0 视为空仓，不产生后坐力。
+        boolean hasAmmo = gunStatus == null || gunStatus.totalAmmo != 0;
+        boolean triggerShooting = com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting();
+        boolean fireInput = triggerShooting
+                || (mc.options.keyAttack.isDown() && hasAmmo)
+                || (isRelease && mc.options.keyUse.isDown() && hasAmmo);
+        if (fireInput) {
             lastGunShootTime = System.currentTimeMillis();
         }
-        boolean isGunFiring = isGun && (!isRelease 
-                ? ((System.currentTimeMillis() - lastGunShootTime < 350L) || mc.options.keyAttack.isDown() || com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting())
-                : (System.currentTimeMillis() - lastGunShootTime < 250L));
+        boolean isGunFiring = isGun && (System.currentTimeMillis() - lastGunShootTime < (isRelease ? 250L : 350L));
+
         boolean isGunAiming = isGun && AutoAttackerConfig.ENABLE_ADS_SENSING.get() && com.xdyyj.autoattacker.weapon.FirearmAdapter.isAiming(player);
 
         float factorPitch = baseFactor;
@@ -1042,8 +1066,14 @@ public class ClientEvents {
             dampedCamDeltaX *= (absDeltaCamX / 0.03f);
         }
 
-        float alphaY = 1.0f - (float) Math.pow(1.0 - factorYaw, deltaSec * 20.0);
-        float alphaX = 1.0f - (float) Math.pow(1.0 - factorPitch, deltaSec * 20.0);
+        // 夹取平滑因子：factor 若为 NaN 或越界，Math.pow 会产出 NaN，
+        // 而 Mth.clamp 不拦 NaN，最终会让 player.setXRot(NaN) 把视角永久锁死（需重登）。
+        float fy = Mth.clamp(factorYaw, 0.0f, 0.95f);
+        float fx = Mth.clamp(factorPitch, 0.0f, 0.95f);
+        if (Float.isNaN(fy)) fy = 0.5f;
+        if (Float.isNaN(fx)) fx = 0.5f;
+        float alphaY = 1.0f - (float) Math.pow(1.0 - fy, deltaSec * 20.0);
+        float alphaX = 1.0f - (float) Math.pow(1.0 - fx, deltaSec * 20.0);
         float stepCamY = kinematicCamYaw + dampedCamDeltaY * alphaY;
         float stepCamX = kinematicCamPitch + dampedCamDeltaX * alphaX;
 
@@ -1097,8 +1127,14 @@ public class ClientEvents {
             player.yHeadRotO = newPlayerYaw;
         }
 
-        lastLockedYaw = isShoulder ? newCamYaw : newPlayerYaw;
-        lastLockedPitch = isShoulder ? newCamPitch : newPlayerPitch;
+        // 记录本帧最终朝向，并保存"本模组自身施加的增量"供下一帧剔除自转
+        float finalYaw = isShoulder ? newCamYaw : newPlayerYaw;
+        float finalPitch = isShoulder ? newCamPitch : newPlayerPitch;
+        selfAppliedYaw = Mth.wrapDegrees(finalYaw - curYaw);
+        selfAppliedPitch = finalPitch - curPitch;
+
+        lastLockedYaw = finalYaw;
+        lastLockedPitch = finalPitch;
         wasLockedLastFrame = true;
     }
 
