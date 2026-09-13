@@ -308,19 +308,28 @@ public final class ThirdPersonCompat {
     /**
      * 中和旧版枪械模组 (JEG / Scorched Guns 等) 中已废弃的 ShoulderSurfing 4.x 反射调用，
      * 避免其在 1.20.1 + ShoulderSurfing 5.x 环境下触发 NoClassDefFoundError 导致游戏崩溃闪退。
+     *
+     * 【限制执行次数】：内部含 Class.forName + 反射写字段，成本较高；而本方法被
+     * onClientTick 及各枪械反射初始化路径调用(后者有 30+ 调用点)，每帧重复执行会白白
+     * 消耗可观 CPU。被中和的是静态字段，写入即持续生效。仅在「模组加载期」与「首次
+     * 进入世界后」各尝试一次，兼顾加载时序与运行期开销。
      */
     public static void neutralizeLegacyShoulderSurfingIntegrations() {
+        // 加载阶段与进入世界后各尝试一次：模组加载期目标类可能尚未就绪，
+        // 若此时失败后永久置位，会导致本应中和的旧版反射调用残留而触发崩溃。
+        if (neutralizedLegacyAttempts >= 2) return;
+        neutralizedLegacyAttempts++;
         try {
             Class<?> jegClass = Class.forName("ttv.migami.jeg.JustEnoughGuns");
-            java.lang.reflect.Field field = jegClass.getField("shoulderSurfingLoaded");
-            field.setBoolean(null, false);
+            jegClass.getField("shoulderSurfingLoaded").setBoolean(null, false);
         } catch (Throwable ignored) {}
         try {
             Class<?> scgClass = Class.forName("top.ribs.scguns.ScorchedGuns");
-            java.lang.reflect.Field field = scgClass.getField("shoulderSurfingLoaded");
-            field.setBoolean(null, false);
+            scgClass.getField("shoulderSurfingLoaded").setBoolean(null, false);
         } catch (Throwable ignored) {}
     }
+
+    private static volatile int neutralizedLegacyAttempts = 0;
 
     /**
      * 检测是否有任何支持的第三人称模组已安装

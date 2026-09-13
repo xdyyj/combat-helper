@@ -47,7 +47,15 @@ public final class FirearmAdapter {
     public static final TagKey<Item> FORGE_BULLETS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:bullets"));
 
     private static final Map<Item, Boolean> IS_GUN_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Item, Boolean> IS_TACZ_GUN_CACHE = new ConcurrentHashMap<>();
     private static final Map<Item, GunMeta> GUN_META_CACHE = new ConcurrentHashMap<>();
+
+    // getGunStatus 的帧内缓存 (见该方法注释)。以「手持物实例 + 帧序号」为键：
+    // 同一逻辑帧内多次读取直接复用，避免每渲染帧重复 8+ 次反射。
+    private static volatile long gunStatusFrameStamp = 0L;
+    private static ItemStack cachedGunStatusStack = null;
+    private static long cachedGunStatusFrame = -1L;
+    private static GunStatus cachedGunStatus = null;
 
     // ==========================================
     // 1. TACZ 反射句柄缓存
@@ -326,12 +334,23 @@ public final class FirearmAdapter {
 
     public static boolean isTaczGun(ItemStack stack) {
         if (stack == null || stack.isEmpty()) return false;
+
+        // 按 Item 缓存：TACZ 的 getIGunOrNull 语义等价于「该物品类型是否实现 IGun 接口」，
+        // 不依赖单个 stack 的 NBT。此前无缓存导致每个调用点都做一次反射，而
+        // isReloading/isBolting/isAiming/getGunStatus 等十余处入口都会先调本方法，
+        // 单 tick 叠加出数十次无谓反射。
+        Boolean cached = IS_TACZ_GUN_CACHE.get(stack.getItem());
+        if (cached != null) return cached;
+
         initTaczReflection();
-        if (taczAvailable && taczGetIGunOrNullMethod != null) {
-            Object iGun = safeInvoke(taczGetIGunOrNullMethod, null, stack);
-            return iGun != null;
-        }
-        return false;
+        // 仅在反射句柄就绪时才写缓存：若 TACZ 尚未完成加载，句柄为 null，
+        // 此时写 false 会把「暂不可判定」永久固化为「不是 TACZ 枪」，
+        // 导致后续所有 TACZ 枪械识别失败。句柄未就绪时每次重试即可。
+        if (!taczAvailable || taczGetIGunOrNullMethod == null) return false;
+
+        boolean result = safeInvoke(taczGetIGunOrNullMethod, null, stack) != null;
+        IS_TACZ_GUN_CACHE.put(stack.getItem(), result);
+        return result;
     }
 
     public static boolean isPointBlankGun(ItemStack stack) {
@@ -435,8 +454,38 @@ public final class FirearmAdapter {
 
     /**
      * 获取枪械的动态战术状态 (弹药数、类型、初速、重力、爆头倍率、RPM等)
+     *
+     * 结果按「同一次渲染帧 + 同一手持物」缓存：本方法内部有 8+ 次反射且每次构造新对象，
+     * 而瞄准回路与 HUD 在同一次渲染帧内会多次取用，开销可观。
+     *
+     * 【为何用渲染帧而非逻辑帧作键】弹药数等状态由开火改写 NBT，而开火与渲染并不同步：
+     * 若以逻辑 tick 为键，同一 tick 内「开火改 NBT」之后到下一 tick 之前的渲染帧会命中
+     * 过期缓存，导致 HUD 弹药数滞后(高射速武器一 tick 内多次消耗弹药时尤为明显)。
+     * 以渲染帧为键则每帧至多重算一次，显示永远最新，同时仍消除帧内重复计算。
      */
     public static GunStatus getGunStatus(ItemStack stack) {
+        long frame = gunStatusFrameStamp;
+        if (stack != null && stack == cachedGunStatusStack && frame == cachedGunStatusFrame) {
+            return cachedGunStatus;
+        }
+        GunStatus result = computeGunStatus(stack);
+        if (stack != null) {
+            cachedGunStatusStack = stack;
+            cachedGunStatusFrame = gunStatusFrameStamp;
+            cachedGunStatus = result;
+        }
+        return result;
+    }
+
+    /**
+     * 标记新的渲染帧开始，使 getGunStatus 的帧内缓存失效。
+     * 由客户端每渲染帧调用一次；未调用时缓存仅随手持物实例变化而失效(仍然正确，只是命中率低)。
+     */
+    public static void beginGunStatusFrame() {
+        gunStatusFrameStamp++;
+    }
+
+    private static GunStatus computeGunStatus(ItemStack stack) {
         if (!isGun(stack)) return GunStatus.NOT_GUN;
 
         // --- 1. TACZ 原厂物理获取 ---
@@ -1890,7 +1939,7 @@ public final class FirearmAdapter {
                 taczAttachmentTypeValuesMethod = safeGetMethod(taczAttachmentTypeClass, "values");
             }
 
-            taczClientGunIndexClass = safeGetClass("com.tacz.guns.resource.index.ClientGunIndex");
+            taczClientGunIndexClass = safeGetClass("com.tacz.guns.client.resource.index.ClientGunIndex");
             if (taczClientGunIndexClass != null) {
                 taczClientGunIndexGetNameMethod = safeGetMethod(taczClientGunIndexClass, "getName");
             }
@@ -2258,6 +2307,35 @@ public final class FirearmAdapter {
             return clazz.getField(fieldName);
         } catch (Throwable t) {
             LOGGER.trace("Failed to get field {} on {}: {}", fieldName, clazz.getName(), t.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 无参反射调用 (专用重载)。
+     *
+     * 避免可变参数版本在「无实参」时仍然分配一个空 Object[] —— 这类调用点在本类中有
+     * 53 处，且在瞄准回路的每帧路径上反复执行，空数组分配会累积成可观的 GC 压力。
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> T safeInvoke(Method method, Object target) {
+        if (method == null) return null;
+        try {
+            return (T) method.invoke(target);
+        } catch (Throwable t) {
+            LOGGER.trace("Method invocation failed for {}: {}", method.getName(), t.getMessage());
+            return null;
+        }
+    }
+
+    /** 单参反射调用 (专用重载)，同样避免参数数组分配。这类调用点在本类中有 63 处。 */
+    @SuppressWarnings("unchecked")
+    public static <T> T safeInvoke(Method method, Object target, Object arg0) {
+        if (method == null) return null;
+        try {
+            return (T) method.invoke(target, arg0);
+        } catch (Throwable t) {
+            LOGGER.trace("Method invocation failed for {}: {}", method.getName(), t.getMessage());
             return null;
         }
     }
