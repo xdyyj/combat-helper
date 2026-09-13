@@ -61,6 +61,48 @@ public class TacticalDebugPanel {
     private static long resetConfirmTime = 0L;
     private static long clearAllConfirmTime = 0L;
 
+    // --- 渲染数据快照缓存 (避免每帧走反射链与 tooltip 构建) ---
+    // GUI 渲染可达 240fps，而面板显示的是枪支属性/弹药等变化缓慢的数据，
+    // 每帧重算 FirearmAdapter.getGunStatus(20+ 次反射) 与
+    // TooltipBallisticsExtractor.extract(构建完整 tooltip + 正则匹配) 开销过大。
+    // 这里按 HUD_REFRESH_INTERVAL_MS 节流为约 10Hz 刷新一次快照。
+    private static final long HUD_REFRESH_INTERVAL_MS = 100L;
+    private static long hudSnapshotNanos = 0L;
+    private static ItemStack hudCachedWeapon = ItemStack.EMPTY;
+    private static com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus hudCachedGun = null;
+    private static AutoBallisticsTracker.BallisticsProfile hudCachedProfile = null;
+    private static TooltipBallisticsExtractor.ExtractedBallistics hudCachedExtracted = null;
+    private static boolean hudCachedExtractedValid = false;
+
+    /**
+     * 刷新渲染数据快照。按时间间隔节流，并在手持武器变化时立即失效重算。
+     * 仅在 render 的可见分支内调用。
+     */
+    private static void refreshSnapshot(Player player, ItemStack weaponStack) {
+        long now = System.nanoTime();
+        boolean weaponChanged = !ItemStack.matches(weaponStack, hudCachedWeapon);
+        boolean expired = (now - hudSnapshotNanos) >= HUD_REFRESH_INTERVAL_MS * 1_000_000L;
+        if (!weaponChanged && !expired) return;
+
+        hudSnapshotNanos = now;
+        hudCachedWeapon = weaponStack.copy();
+        hudCachedGun = null;
+        hudCachedProfile = null;
+        hudCachedExtracted = null;
+        hudCachedExtractedValid = false;
+
+        if (weaponStack.isEmpty()) return;
+
+        if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(weaponStack)) {
+            hudCachedGun = com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(weaponStack);
+        } else {
+            hudCachedProfile = AutoBallisticsTracker.getProfile(weaponStack);
+            // tooltip 解析仅在弓弩分页需要，且其开销最大 (构建 tooltip + 正则)，故一并纳入节流
+            hudCachedExtracted = TooltipBallisticsExtractor.extract(weaponStack, player);
+            hudCachedExtractedValid = true;
+        }
+    }
+
     public static void toggleControl() {
         Minecraft mc = Minecraft.getInstance();
         if (!isControlActive) {
@@ -112,6 +154,9 @@ public class TacticalDebugPanel {
         int screenH = mc.getWindow().getGuiScaledHeight();
         ensurePosition(screenW, screenH);
         Font font = mc.font;
+
+        // 刷新渲染数据快照 (节流 ~10Hz)：避免每帧走反射链 / 构建 tooltip
+        refreshSnapshot(player, activeWeapon);
 
         graphics.pose().pushPose();
         graphics.pose().translate(0.0F, 0.0F, 400.0F);
@@ -285,7 +330,10 @@ public class TacticalDebugPanel {
             renderModernButton(graphics, font, mouseX, mouseY, panelX + 5, y6, PANEL_WIDTH - 10, 13, "同步枪械原厂直瞄参数", 0xFF1D7846);
 
             int y7 = y6 + 15;
-            com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus gun = com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(weaponStack);
+            com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus gun = hudCachedGun;
+            if (gun == null) {
+                gun = com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(weaponStack);
+            }
             int maxCap = gun.getEffectiveMaxAmmo();
             String ammoDesc = (gun.totalAmmo >= 0) ? 
                 (gun.totalAmmo + "/" + (maxCap > 0 ? maxCap : "∞")) : "满装";
@@ -293,7 +341,9 @@ public class TacticalDebugPanel {
 
         } else if (category == ClientEvents.WeaponCategory.BOW) {
             // === 传统弓弩 ===
-            AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(weaponStack);
+            AutoBallisticsTracker.BallisticsProfile profile = (hudCachedProfile != null)
+                    ? hudCachedProfile
+                    : AutoBallisticsTracker.getProfile(weaponStack);
 
             int y1 = startY + 16;
             graphics.drawString(font, "初速", panelX + 6, y1 + 2, 0xFFB0B6C2, false);
@@ -318,7 +368,13 @@ public class TacticalDebugPanel {
             renderToggleSwitch(graphics, font, mouseX, mouseY, panelX + 6, y5, "自寻的 / 锁定追踪", profile.isHoming);
 
             int y6 = y5 + 14;
-            TooltipBallisticsExtractor.ExtractedBallistics extracted = TooltipBallisticsExtractor.extract(weaponStack, player);
+            // 读节流快照；首次尚未填充时(切到弓弩页的当帧)才回退一次实算
+            TooltipBallisticsExtractor.ExtractedBallistics extracted;
+            if (hudCachedExtractedValid) {
+                extracted = hudCachedExtracted;
+            } else {
+                extracted = TooltipBallisticsExtractor.extract(weaponStack, player);
+            }
             boolean hasExtracted = (extracted != null && extracted.hasAnyData());
             String btnText = hasExtracted ? "应用 Tooltip 参数" : "重新扫描 Tooltip 参数";
             renderModernButton(graphics, font, mouseX, mouseY, panelX + 5, y6, PANEL_WIDTH - 10, 13, btnText, hasExtracted ? 0xFF1D5A96 : 0);
