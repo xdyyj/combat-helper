@@ -1475,7 +1475,7 @@ public class ClientEvents {
             AABB aabb = entity.getBoundingBox().inflate(0.15D);
             Optional<Vec3> hit = aabb.clip(eyePos, endPos);
             if (hit.isPresent()) {
-                hits.add(new Candidate(entity, 0.0D, eyePos.distanceToSqr(hit.get()), 0.0D, true));
+                hits.add(new Candidate(entity, 0.0D, eyePos.distanceToSqr(hit.get()), 0.0D));
             } else {
                 // 如果距离稍远，角度在极小容差内也算作指向候选
                 double dX = entity.getX() - eyePos.x;
@@ -1496,12 +1496,11 @@ public class ClientEvents {
 
         if (hits.isEmpty()) return null;
 
-        // 命中盒相交者优先 (距离即射线命中距)，其次按与准星夹角
-        hits.sort((a, b) -> {
-            if (a.hitbox != b.hitbox) return a.hitbox ? -1 : 1;
-            if (a.hitbox) return Double.compare(a.distSqr, b.distSqr);
-            return Double.compare(a.angle, b.angle);
-        });
+        // 按「眼睛到目标」的距离升序。两个来源的 distSqr 语义与原实现一致：
+        // 命中盒相交者取「眼睛→碰撞箱表面交点」的距离，角度容差候选取「玩家→实体中心」。
+        // 若改成「命中盒候选绝对优先」，会在命中盒候选较远、角度候选更近的几何下
+        // 选出与原实现不同的目标 —— 属于未经要求的语义改动，故按距离统一比较。
+        hits.sort((a, b) -> Double.compare(a.distSqr, b.distSqr));
 
         int limit = Math.min(hits.size(), MAX_SWITCH_CANDIDATE_SCANS);
         double bestDistSqr = Double.MAX_VALUE;
@@ -1735,19 +1734,12 @@ public class ClientEvents {
         final double angle;
         final double distSqr;
         final double alignment;
-        /** 是否为准星命中盒相交 (优先于纯角度接近)。 */
-        final boolean hitbox;
 
         Candidate(LivingEntity entity, double angle, double distSqr, double alignment) {
-            this(entity, angle, distSqr, alignment, false);
-        }
-
-        Candidate(LivingEntity entity, double angle, double distSqr, double alignment, boolean hitbox) {
             this.entity = entity;
             this.angle = angle;
             this.distSqr = distSqr;
             this.alignment = alignment;
-            this.hitbox = hitbox;
         }
     }
 
