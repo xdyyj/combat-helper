@@ -819,6 +819,7 @@ public class ClientEvents {
 
         float destYaw = directYaw;
         float destPitch = directPitch;
+        Vec3 finalTargetPoint = baseAimPoint;
 
         if (isHoldingBow && profile != null && !profile.isHoming && AutoAttackerConfig.ENABLE_AIM_PREDICT.get()) {
             PredictedAim predicted = computePredictedAim(player, target, profile.speed, profile.gravity, eye, baseAimPoint);
@@ -835,6 +836,10 @@ public class ClientEvents {
                 destPitch = directPitch + leadPitchDelta * strength;
                 staticLastPredictedYaw = destYaw;
                 staticLastPredictedPitch = destPitch;
+
+                if (predicted.interceptPos != null) {
+                    finalTargetPoint = baseAimPoint.lerp(predicted.interceptPos, strength);
+                }
             } else {
                 staticLastPredictedYaw = directYaw;
                 staticLastPredictedPitch = directPitch;
@@ -850,27 +855,13 @@ public class ClientEvents {
 
         if (isShoulder) {
             Vec3 camPos = ShoulderSurfingCompat.getCameraPosition();
-            double cdx = tx - camPos.x;
-            double cdy = baseTargetY - camPos.y;
-            double cdz = tz - camPos.z;
+            double cdx = finalTargetPoint.x - camPos.x;
+            double cdy = finalTargetPoint.y - camPos.y;
+            double cdz = finalTargetPoint.z - camPos.z;
             double cHoriz = Math.sqrt(cdx * cdx + cdz * cdz);
-            float camDirectYaw = (float) (Mth.atan2(cdz, cdx) * (180D / Math.PI)) - 90.0F;
-            float camDirectPitch = (float) -(Mth.atan2(cdy, cHoriz) * (180D / Math.PI));
+            destCamYaw = (float) (Mth.atan2(cdz, cdx) * (180D / Math.PI)) - 90.0F;
+            destCamPitch = (float) -(Mth.atan2(cdy, cHoriz) * (180D / Math.PI));
 
-            if (isHoldingBow && profile != null && !profile.isHoming && AutoAttackerConfig.ENABLE_AIM_PREDICT.get() && staticLastPredictedAim != null) {
-                float leadYawDelta = Mth.wrapDegrees(staticLastPredictedAim.targetYaw - directYaw);
-                float leadPitchDelta = staticLastPredictedAim.targetPitch - directPitch;
-
-                double stability = computeMotionStability(lastMeasuredVelocity, smoothedTargetVelocity);
-                double configuredBlend = AutoAttackerConfig.AIM_PREDICT_BLEND.get();
-                float strength = (float) Mth.clamp(configuredBlend * stability, 0.0D, 1.0D);
-
-                destCamYaw = camDirectYaw + leadYawDelta * strength;
-                destCamPitch = camDirectPitch + leadPitchDelta * strength;
-            } else {
-                destCamYaw = camDirectYaw;
-                destCamPitch = camDirectPitch;
-            }
             staticLastPredictedCamYaw = destCamYaw;
             staticLastPredictedCamPitch = destCamPitch;
         } else {
@@ -1000,15 +991,19 @@ public class ClientEvents {
             double userDeflection = Math.hypot(mouseDeflectionYaw, mouseDeflectionPitch);
             float userDamping = (float) Mth.clamp(1.0 - (userDeflection / 10.0), 0.2, 1.0);
 
-            // 当枪械处于射击状态且准星被后坐力抬高 (deltaCamX > 0，即玩家视线向上偏离目标，需要下压纠正) 时：
-            // 远距离 (如 68m) 角误差对准星偏移极其敏感，必须提供强劲充沛的下压刚度，绝不能被 0.48 封顶卡死！
-            if (isGunFiring && deltaCamX > 0) {
-                float distBoost = (float) Mth.clamp(targetDistXZ / 30.0, 1.0, 2.2);
-                factorPitch = Math.min(0.92f, baseFactor + 0.38f * recoilMult * smoothedRecoilBoost * distBoost * userDamping);
+            // 当枪械处于射击状态时：平衡水平与垂直追踪刚度，避免俯仰角极速收敛而偏航角严重滞后导致斜向偏右上
+            if (isGunFiring) {
+                float distBoost = (float) Mth.clamp(targetDistXZ / 30.0, 1.0, 2.0);
+                if (deltaCamX > 0) {
+                    factorPitch = Math.min(0.85f, baseFactor + 0.32f * recoilMult * smoothedRecoilBoost * distBoost * userDamping);
+                } else {
+                    factorPitch = Math.min(0.65f, baseFactor + 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
+                }
+                factorYaw = Math.min(0.75f, baseFactor + 0.25f * recoilMult * smoothedRecoilBoost * userDamping);
             } else {
                 factorPitch = Math.min(0.60f, baseFactor + 0.20f * recoilMult * smoothedRecoilBoost * userDamping);
+                factorYaw = Math.min(0.60f, baseFactor + 0.15f * recoilMult * smoothedRecoilBoost * userDamping);
             }
-            factorYaw = Math.min(0.45f, baseFactor + 0.12f * recoilMult * smoothedRecoilBoost * userDamping);
         } else {
             smoothedRecoilBoost = 0.0f;
         }
@@ -1045,20 +1040,28 @@ public class ClientEvents {
         float newPlayerPitch;
 
         if (isShoulder) {
-            float absDeltaPlayerY = Math.abs(deltaPlayerY);
-            float absDeltaPlayerX = Math.abs(deltaPlayerX);
-            float dampedPlayerDeltaY = deltaPlayerY;
-            float dampedPlayerDeltaX = deltaPlayerX;
-            if (absDeltaPlayerY < 0.03f) {
-                dampedPlayerDeltaY *= (absDeltaPlayerY / 0.03f);
+            // 关键几何收敛：第三人称越肩模式下，屏幕正中心准星在世界空间对应一条视线射线。
+            // 以目标所在距离 D 处为基准交点 crosshairWorldPoint，逆解算玩家眼睛至该交点的射击朝向 newPlayerYaw/Pitch。
+            // 无论准星处于平滑插值移动中还是完全锁死，发射出的子弹/箭矢均严格穿透准星屏幕所指目标，彻底消除视差与不对称平滑漂移！
+            Vec3 camPos = ShoulderSurfingCompat.getCameraPosition();
+            double targetDist = Math.max(0.5, camPos.distanceTo(finalTargetPoint));
+            Vec3 camDir = Vec3.directionFromRotation(newCamPitch, newCamYaw);
+            Vec3 crosshairWorldPoint = camPos.add(camDir.scale(targetDist));
+
+            double pdx = crosshairWorldPoint.x - eye.x;
+            double pdy = crosshairWorldPoint.y - eye.y;
+            double pdz = crosshairWorldPoint.z - eye.z;
+            double pHoriz = Math.sqrt(pdx * pdx + pdz * pdz);
+            newPlayerYaw = (float) (Mth.atan2(pdz, pdx) * (180D / Math.PI)) - 90.0F;
+            float rawPlayerPitch = (float) -(Mth.atan2(pdy, pHoriz) * (180D / Math.PI));
+
+            // 若使用具备弹道重力下坠的抛物线武器 (非直瞄枪械)，叠加上弹道解算所得的抛物线仰角补偿
+            if (isHoldingBow && !isGun && profile != null && !profile.isHoming && staticLastPredictedAim != null) {
+                float gravityPitchDelta = destPitch - directPitch;
+                newPlayerPitch = Mth.clamp(rawPlayerPitch + gravityPitchDelta, -89.5F, 89.5F);
+            } else {
+                newPlayerPitch = Mth.clamp(rawPlayerPitch, -89.5F, 89.5F);
             }
-            if (absDeltaPlayerX < 0.03f) {
-                dampedPlayerDeltaX *= (absDeltaPlayerX / 0.03f);
-            }
-            float stepPlayerY = kinematicPlayerYaw + dampedPlayerDeltaY * alphaY;
-            float stepPlayerX = kinematicPlayerPitch + dampedPlayerDeltaX * alphaX;
-            newPlayerYaw = curPlayerYaw + stepPlayerY;
-            newPlayerPitch = Mth.clamp(curPlayerPitch + stepPlayerX, -89.5F, 89.5F);
 
             ShoulderSurfingCompat.setCameraRotation(newCamYaw, newCamPitch);
             ShoulderSurfingCompat.syncPlayerRotation(newPlayerYaw, newPlayerPitch);

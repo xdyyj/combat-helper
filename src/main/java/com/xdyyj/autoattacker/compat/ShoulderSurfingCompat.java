@@ -68,6 +68,14 @@ public final class ShoulderSurfingCompat {
         ThirdPersonCompat.syncPlayerRotation(playerYaw, playerPitch);
     }
 
+    public static void suppressLeawindInteractionRotation() {
+        ThirdPersonCompat.suppressLeawindInteractionRotation();
+    }
+
+    public static void restoreLeawindInteractionRotation() {
+        ThirdPersonCompat.restoreLeawindInteractionRotation();
+    }
+
     /**
      * 获取第三人称相机的空间坐标位置
      */

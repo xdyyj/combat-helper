@@ -68,6 +68,19 @@ public final class ThirdPersonCompat {
     private static Object lwSmoothingImmediate = null;
     private static Field lwRefreshPredictedTargetField = null;
 
+    // PlayerSettings (autoRotateInteracting 交互强制转向控制)
+    private static MethodHandle lwPlayerSettingsHandle = null;
+    private static MethodHandle lwSetAutoRotateInteractingHandle = null;
+    private static MethodHandle lwGetAutoRotateInteractingHandle = null;
+    private static volatile Boolean originalAutoRotateInteracting = null;
+
+    // CameraPose (当前帧无延迟实时相机坐标读取)
+    private static MethodHandle lwFinalCameraPoseHandle = null;
+    private static Field lwCameraPosePositionField = null;
+    private static Field jomlVector3dXField = null;
+    private static Field jomlVector3dYField = null;
+    private static Field jomlVector3dZField = null;
+
     private static volatile boolean wasLeawindAimingForced = false;
 
     private ThirdPersonCompat() {}
@@ -255,6 +268,34 @@ public final class ThirdPersonCompat {
                     Class<?> schedIntegClass = Class.forName("io.github.leawind.thirdperson.internal.logic.scheduler.MinecraftSchedulingIntegration");
                     lwRefreshPredictedTargetField = schedIntegClass.getDeclaredField("refreshPredictedTargetEachFrame");
                     lwRefreshPredictedTargetField.setAccessible(true);
+                } catch (Throwable ignored) {}
+
+                // 5. 绑定 PlayerSettings (autoRotateInteracting 控制，防止开火时短程射线覆盖玩家朝向)
+                try {
+                    Method mPlayerSettings = schedRuntimeClass.getMethod("playerSettings");
+                    lwPlayerSettingsHandle = lookup.unreflect(mPlayerSettings);
+
+                    Class<?> playerSettingsClass = Class.forName("io.github.leawind.thirdperson.internal.logic.scheduler.rotation.PlayerSettings");
+                    Method mSetAutoRotate = playerSettingsClass.getMethod("setAutoRotateInteracting", boolean.class);
+                    lwSetAutoRotateInteractingHandle = lookup.unreflect(mSetAutoRotate);
+
+                    Method mGetAutoRotate = playerSettingsClass.getMethod("autoRotateInteracting");
+                    lwGetAutoRotateInteractingHandle = lookup.unreflect(mGetAutoRotate);
+                } catch (Throwable ignored) {}
+
+                // 6. 绑定 CameraPose (直接从 BaseSession.finalCameraPose() 读取当前帧无延迟相机实时空间坐标)
+                try {
+                    Method mFinalCamPose = baseSessionClass.getMethod("finalCameraPose");
+                    lwFinalCameraPoseHandle = lookup.unreflect(mFinalCamPose);
+
+                    Class<?> camPoseClass = Class.forName("io.github.leawind.thirdperson.internal.logic.base.camera.CameraPose");
+                    lwCameraPosePositionField = camPoseClass.getDeclaredField("position");
+                    lwCameraPosePositionField.setAccessible(true);
+
+                    Class<?> vec3dClass = Class.forName("org.joml.Vector3d");
+                    jomlVector3dXField = vec3dClass.getField("x");
+                    jomlVector3dYField = vec3dClass.getField("y");
+                    jomlVector3dZField = vec3dClass.getField("z");
                 } catch (Throwable ignored) {}
 
                 leawindLoaded = true;
@@ -497,6 +538,9 @@ public final class ThirdPersonCompat {
     public static void syncPlayerRotation(float playerYaw, float playerPitch) {
         if (!initialized) init();
 
+        // 确保在同步玩家角度时禁用 Leawind 交互强制转向覆盖
+        suppressLeawindInteractionRotation();
+
         Minecraft mc = Minecraft.getInstance();
         if (mc != null && mc.player != null) {
             mc.player.setYRot(playerYaw);
@@ -552,10 +596,55 @@ public final class ThirdPersonCompat {
     }
 
     /**
+     * 禁用 Leawind 的玩家交互强制转向覆盖 (autoRotateInteracting = false)
+     * 彻底杜绝开火 (左键攻击) 时 Leawind 内部 3.0 格短程射线检测落空强制覆盖玩家角度为相机角度
+     */
+    public static void suppressLeawindInteractionRotation() {
+        if (!initialized) init();
+        if (isLeawindActive() && lwGetSchedulerRuntimeHandle != null && lwPlayerSettingsHandle != null && lwSetAutoRotateInteractingHandle != null) {
+            try {
+                Object sched = lwGetSchedulerRuntimeHandle.invoke();
+                if (sched != null) {
+                    Object settings = lwPlayerSettingsHandle.invoke(sched);
+                    if (settings != null) {
+                        if (originalAutoRotateInteracting == null && lwGetAutoRotateInteractingHandle != null) {
+                            originalAutoRotateInteracting = (boolean) lwGetAutoRotateInteractingHandle.invoke(settings);
+                        }
+                        lwSetAutoRotateInteractingHandle.invoke(settings, false);
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    /**
+     * 平滑恢复 Leawind 原本的玩家交互强制转向设置
+     */
+    public static void restoreLeawindInteractionRotation() {
+        if (originalAutoRotateInteracting != null && isLeawindActive() && lwGetSchedulerRuntimeHandle != null && lwPlayerSettingsHandle != null && lwSetAutoRotateInteractingHandle != null) {
+            try {
+                Object sched = lwGetSchedulerRuntimeHandle.invoke();
+                if (sched != null) {
+                    Object settings = lwPlayerSettingsHandle.invoke(sched);
+                    if (settings != null) {
+                        lwSetAutoRotateInteractingHandle.invoke(settings, originalAutoRotateInteracting.booleanValue());
+                    }
+                }
+            } catch (Throwable ignored) {}
+            originalAutoRotateInteracting = null;
+        }
+    }
+
+    /**
      * 设置瞄准状态 (主要用于驱动 Leawind 准星显示与镜头模式)
      */
     public static void setAiming(boolean aiming) {
         if (!initialized) init();
+        if (aiming) {
+            suppressLeawindInteractionRotation();
+        } else {
+            restoreLeawindInteractionRotation();
+        }
         if (isLeawindActive() && lwGetSchedulerRuntimeHandle != null && lwSetAimingHandle != null) {
             try {
                 Object sched = lwGetSchedulerRuntimeHandle.invoke();
@@ -568,9 +657,10 @@ public final class ThirdPersonCompat {
     }
 
     /**
-     * 当自瞄解除锁定或目标丢失时，平滑重置 Leawind 强制瞄准状态
+     * 当自瞄解除锁定或目标丢失时，平滑重置 Leawind 强制瞄准状态并恢复设置
      */
     public static void resetAiming() {
+        restoreLeawindInteractionRotation();
         if (wasLeawindAimingForced) {
             wasLeawindAimingForced = false;
             if (leawindLoaded && lwGetSchedulerRuntimeHandle != null && lwSetAimingHandle != null) {
@@ -586,8 +676,35 @@ public final class ThirdPersonCompat {
 
     /**
      * 获取第三人称相机的空间世界坐标位置
+     * 优先直接从 Leawind BaseSession.finalCameraPose() 读取当前帧无延迟最新坐标，消除 Minecraft Camera.getPosition() 1 帧时差
      */
     public static Vec3 getCameraPosition() {
+        if (!initialized) init();
+
+        if (isLeawindActive() && lwGetBaseRuntimeHandle != null && lwBaseSessionHandle != null &&
+            lwFinalCameraPoseHandle != null && lwCameraPosePositionField != null &&
+            jomlVector3dXField != null && jomlVector3dYField != null && jomlVector3dZField != null) {
+            try {
+                Object base = lwGetBaseRuntimeHandle.invoke();
+                if (base != null) {
+                    Object session = lwBaseSessionHandle.invoke(base);
+                    if (session != null) {
+                        Object optPose = lwFinalCameraPoseHandle.invoke(session);
+                        if (optPose instanceof Optional<?> opt && opt.isPresent()) {
+                            Object camPose = opt.get();
+                            Object posObj = lwCameraPosePositionField.get(camPose);
+                            if (posObj != null) {
+                                double x = jomlVector3dXField.getDouble(posObj);
+                                double y = jomlVector3dYField.getDouble(posObj);
+                                double z = jomlVector3dZField.getDouble(posObj);
+                                return new Vec3(x, y, z);
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+
         Minecraft mc = Minecraft.getInstance();
         if (mc != null && mc.gameRenderer != null) {
             Camera camera = mc.gameRenderer.getMainCamera();
