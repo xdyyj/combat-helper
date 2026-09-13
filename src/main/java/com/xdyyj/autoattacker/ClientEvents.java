@@ -695,7 +695,8 @@ public class ClientEvents {
                         boolean hardInvalid = isInvalid;
                         if (hardInvalid) {
                             if (autoSwitchAllowed) {
-                                currentTarget = pickBetterTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
+                                // 目标已确定性失效：属于「必须换」，不加收益门槛
+                                currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
                             } else {
                                 currentTarget = null;
                             }
@@ -704,7 +705,8 @@ public class ClientEvents {
                             lostTargetGraceTicks++;
                             if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
                                 if (autoSwitchAllowed) {
-                                    currentTarget = pickBetterTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
+                                    // 目标持续超距：同属「必须换」，不加收益门槛
+                                    currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
                                 } else {
                                     currentTarget = null;
                                 }
@@ -715,8 +717,9 @@ public class ClientEvents {
                         lostTargetGraceTicks++;
                         if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
                             if (autoSwitchAllowed) {
-                                // 目标长时间隐蔽入掩体，转火视野内确有更优的暴露目标
-                                currentTarget = pickBetterTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
+                                // 目标长时间隐蔽入掩体：当前目标已打不到，属于「必须换」，
+                                // 不加收益门槛，避免因候选评分略低就干脆解除锁定
+                                currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
                                 lostTargetGraceTicks = 0;
                             } else {
                                 currentTarget = null;
@@ -1612,18 +1615,18 @@ public class ClientEvents {
     }
 
     /**
-     * 在视野内挑选一个「确实优于当前目标」的候选，用于自动转火。
+     * 为「当前目标已不可用」(失效 / 超距 / 长时间无视线) 的场合挑选替代目标。
      *
-     * 与 getPrioritizedTarget 的区别：除非当前目标已经不可用(死亡/消失)，否则候选必须
-     * 在评分上明显超出当前目标才返回。否则返回 null(保持原锁定)，避免仅仅因为
-     * 旁边出现了另一个可见目标就把锁定换走。
+     * 与「主动换目标」路径的区别在于【不施加收益门槛】：收益门槛回答的是
+     * 「要不要主动把锁定换到另一个目标上」，用于防止平滑跟踪的残差造成来回乒乓；
+     * 而此处当前目标已经打不到了，属于「必须换」，只要能找到一个视野内的可用目标
+     * 就应当换过去，而不是因为其评分略低于原目标就干脆解除锁定。
+     *
+     * 注意 current 传入的是已失效的目标，getPrioritizedTarget 会把它排除在候选之外。
      */
-    private LivingEntity pickBetterTarget(Player player, LivingEntity current, double range, float maxAngle) {
-        LivingEntity candidate = getPrioritizedTarget(player, range, maxAngle,
+    private LivingEntity pickReplacementTarget(Player player, LivingEntity current, double range, float maxAngle) {
+        return getPrioritizedTarget(player, range, maxAngle,
                 AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), current);
-        if (candidate == null) return null;
-        if (current == null || current.isRemoved() || !current.isAlive()) return candidate;
-        return switchYieldsGain(player, current, candidate, range) ? candidate : null;
     }
 
     /**
