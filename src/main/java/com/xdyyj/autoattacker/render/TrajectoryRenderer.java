@@ -66,6 +66,48 @@ public final class TrajectoryRenderer {
 
     private TrajectoryRenderer() {}
 
+    // =========================================================================
+    // 视高动态平滑滤波器 (消除下蹲瞬间 0.35m 阶跃突变与相机下沉不同步引起的抛物线抽搐跳动)
+    // =========================================================================
+    private static double smoothedEyeHeight = -1.0D;
+    private static long lastEyeHeightUpdateNanos = 0L;
+
+    public static double getSmoothedEyeHeight(Player player) {
+        if (player == null) return 1.62D;
+        double targetEyeHeight = player.getEyeHeight();
+        long now = System.nanoTime();
+        if (smoothedEyeHeight < 0.0D || lastEyeHeightUpdateNanos == 0L) {
+            smoothedEyeHeight = targetEyeHeight;
+            lastEyeHeightUpdateNanos = now;
+            return smoothedEyeHeight;
+        }
+
+        double dt = (now - lastEyeHeightUpdateNanos) / 1_000_000_000.0D;
+        lastEyeHeightUpdateNanos = now;
+        if (dt <= 0.0D || dt > 0.5D) {
+            smoothedEyeHeight = targetEyeHeight;
+            return smoothedEyeHeight;
+        }
+
+        // 指数阻尼衰减滤波 (半衰期约 100ms，平滑率 18.0，与相机沉降动画精准契合)
+        double blend = 1.0D - Math.exp(-dt * 18.0D);
+        smoothedEyeHeight = Mth.lerp(blend, smoothedEyeHeight, targetEyeHeight);
+        return smoothedEyeHeight;
+    }
+
+    public static Vec3 getSmoothEyePosition(Player player, Camera camera, float partialTick, boolean isFirstPerson) {
+        double px = Mth.lerp((double) partialTick, player.xo, player.getX());
+        double pz = Mth.lerp((double) partialTick, player.zo, player.getZ());
+
+        if (isFirstPerson && camera != null) {
+            // 第一人称下摄像机 Y 坐标原生包含 Minecraft 内部 eyeHeight 滤波平滑，直接同相消除相对晃动
+            return new Vec3(px, camera.getPosition().y, pz);
+        }
+
+        double py = Mth.lerp((double) partialTick, player.yo, player.getY()) + getSmoothedEyeHeight(player);
+        return new Vec3(px, py, pz);
+    }
+
     public static TrajectoryInfo getLastTrajectoryInfo() {
         return lastTrajectoryInfo;
     }
@@ -89,20 +131,62 @@ public final class TrajectoryRenderer {
         boolean hasProjectileWeapon = (profile != null);
 
         AutoAttackerConfig.TrajectoryStyle style = AutoAttackerConfig.TRAJECTORY_STYLE.get();
-        boolean trajectoryMasterEnabled = AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW.get() && style != AutoAttackerConfig.TrajectoryStyle.OFF;
+        boolean trajectoryMasterEnabled = AutoAttackerConfig.ENABLE_MOD.get() && AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW.get() && style != AutoAttackerConfig.TrajectoryStyle.OFF;
         boolean shouldRender3D = trajectoryMasterEnabled && (style == AutoAttackerConfig.TrajectoryStyle.BOTH || style == AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN);
 
         // 1. 物理弹道模拟与屏幕空间投影计算
         if (hasProjectileWeapon && trajectoryMasterEnabled) {
             Camera camera = event.getCamera();
             float partialTick = event.getPartialTick();
-            Vec3 start = player.getEyePosition(partialTick).add(player.getViewVector(partialTick).scale(0.12D));
+            boolean isFirstPerson = mc.options.getCameraType().isFirstPerson() && !com.xdyyj.autoattacker.compat.ThirdPersonCompat.isThirdPerson();
+            Vec3 smoothEyePos = getSmoothEyePosition(player, camera, partialTick, isFirstPerson);
+            Vec3 start = smoothEyePos.add(player.getViewVector(partialTick).scale(0.12D));
 
             Vec3 launchDirection = applyPitchOffset(player.getViewVector(partialTick), profile.pitchOffsetDegrees);
 
             if (launchDirection.lengthSqr() >= 1.0E-8D) {
-                double currentSpeed = calculateCurrentSpeed(player, weaponStack, profile);
-                double simSpeed = (currentSpeed > 0.08D) ? currentSpeed : profile.speed;
+                AutoAttackerConfig.BowTrajectoryMode bowMode = AutoAttackerConfig.BOW_TRAJECTORY_MODE.get();
+                boolean isFullChargeMode = (bowMode == AutoAttackerConfig.BowTrajectoryMode.FULL_CHARGE);
+
+                double simSpeed;
+                boolean shouldSimulate = true;
+
+                boolean isCrossbow = (weaponStack.getItem() instanceof CrossbowItem || weaponStack.getUseAnimation() == net.minecraft.world.item.UseAnim.CROSSBOW);
+
+                if (isCrossbow) {
+                    if (isFullChargeMode) {
+                        simSpeed = profile.speed;
+                    } else {
+                        // 动态模式：仅在弩已装填待发时显示轨迹，未装填时不显示
+                        if (!CrossbowItem.isCharged(weaponStack)) {
+                            shouldSimulate = false;
+                            simSpeed = 0.0D;
+                        } else {
+                            simSpeed = profile.speed;
+                        }
+                    }
+                } else {
+                    // 弓类武器
+                    if (isFullChargeMode) {
+                        // 仅满弓模式：始终按满弓最大射程（3.0 初速）模拟，拉弓时不缩回脚下，方便蓄力前提前预瞄
+                        simSpeed = profile.speed;
+                    } else {
+                        // 动态模式：严格按当前实际拉弓蓄力进度实时伸展弹道；若未按住右键拉弓则不显示弹道
+                        if (!player.isUsingItem() || player.getUseItem() != weaponStack) {
+                            shouldSimulate = false;
+                            simSpeed = 0.0D;
+                        } else {
+                            int useDuration = player.getTicksUsingItem();
+                            float power = BowItem.getPowerForTime(useDuration);
+                            simSpeed = Math.max(0.15D, power * profile.speed);
+                        }
+                    }
+                }
+
+                if (!shouldSimulate) {
+                    lastTrajectoryInfo.valid = false;
+                    return;
+                }
 
                 // 纯净模拟微元轨迹
                 SimResult sim = runSimulation(mc, player, start, launchDirection, simSpeed, profile.gravity, profile.drag, lockedTarget);
@@ -123,7 +207,7 @@ public final class TrajectoryRenderer {
                 lastTrajectoryInfo.onScreen = projected.onScreen;
                 lastTrajectoryInfo.depth = projected.depth;
                 lastTrajectoryInfo.isHoldingBow = profile.isBow;
-                lastTrajectoryInfo.isCharged = (currentSpeed > 0.08D);
+                lastTrajectoryInfo.isCharged = isCrossbow ? CrossbowItem.isCharged(weaponStack) : (player.isUsingItem() || isFullChargeMode);
                 lastTrajectoryInfo.timestamp = System.currentTimeMillis();
 
                 // 2. 方案 B: 3D 侧向手部视差发光节点/点阵光链渲染 (双显或3D光束时生效)
@@ -170,6 +254,8 @@ public final class TrajectoryRenderer {
     // =========================================================================
 
     public static void renderHudReticle(GuiGraphics graphics, float partialTick) {
+        if (!AutoAttackerConfig.ENABLE_MOD.get()) return;
+
         Minecraft mc = Minecraft.getInstance();
         Camera camera = mc.gameRenderer.getMainCamera();
         int screenW = mc.getWindow().getGuiScaledWidth();
@@ -368,7 +454,7 @@ public final class TrajectoryRenderer {
                                                             List<Vec3> physicalPoints, ItemStack weaponStack, Vec3 endPoint) {
         if (physicalPoints.size() < 2) return physicalPoints;
 
-        boolean isFirstPerson = mc.options.getCameraType().isFirstPerson();
+        boolean isFirstPerson = mc.options.getCameraType().isFirstPerson() && !com.xdyyj.autoattacker.compat.ThirdPersonCompat.isThirdPerson();
         Vec3 playerForward = player.getViewVector(partialTick).normalize();
         Vec3 worldUp = new Vec3(0.0D, 1.0D, 0.0D);
         Vec3 playerRight = playerForward.cross(worldUp);
@@ -384,32 +470,43 @@ public final class TrajectoryRenderer {
         boolean onRightSide = usingOffhand ? !isRightHanded : isRightHanded;
         double sideSign = onRightSide ? 1.0D : -1.0D;
 
-        Vec3 eyePos = player.getEyePosition(partialTick);
+        Vec3 eyePos = getSmoothEyePosition(player, camera, partialTick, isFirstPerson);
+        Vec3 physStart = physicalPoints.get(0);
+        double totalDistance = physStart.distanceTo(endPoint);
+
         Vec3 visualOrigin;
+        Vec3 handOffset;
+        double convergeDistance;
+
         if (isFirstPerson) {
             // 第一人称：手部武器模型位于右下侧 (或左手在左下侧)，自然前伸，精致不遮挡视线
             visualOrigin = eyePos
                     .add(playerRight.scale(sideSign * 0.26D))
                     .add(playerUp.scale(-0.18D))
                     .add(playerForward.scale(0.32D));
+            handOffset = visualOrigin.subtract(physStart);
+            convergeDistance = Math.min(totalDistance, 10.0D);
+
+            if (totalDistance < 6.0D) {
+                float distScale = (float) Mth.clamp(totalDistance / 6.0D, 0.15D, 1.0D);
+                handOffset = handOffset.scale(distScale);
+                convergeDistance = Math.max(0.5D, totalDistance * 0.6D);
+            }
         } else {
-            // 第三人称（含 Shoulder Surfing 越肩视角）：根据玩家真实持武器手臂偏置精准计算枪口/持弓手起点
+            // 第三人称（含 Leawind / Shoulder Surfing 越肩视角）：方案 A - 回归物理中线出膛
+            // 彻底移除横向偏置 (playerRight)，使整条弹道严格约束在垂直发射平面内，彻底根除横向S弯与香蕉拐弯畸变
+            // 真实物理投掷物 (箭矢/三叉戟等) 从玩家躯干中线 (低于眼睛 0.10m) 射出，并向前适度延伸 0.35m 防止身体穿模
             visualOrigin = eyePos
-                    .add(playerRight.scale(sideSign * 0.38D))
-                    .add(playerUp.scale(-0.22D))
-                    .add(playerForward.scale(0.20D));
-        }
+                    .add(playerUp.scale(-0.10D))
+                    .add(playerForward.scale(0.35D));
+            handOffset = visualOrigin.subtract(physStart);
+            convergeDistance = Math.min(totalDistance, 0.8D);
 
-        Vec3 physStart = physicalPoints.get(0);
-        Vec3 handOffset = visualOrigin.subtract(physStart);
-
-        double totalDistance = physStart.distanceTo(endPoint);
-        double convergeDistance = Math.min(totalDistance, 10.0D);
-
-        if (totalDistance < 6.0D) {
-            float distScale = (float) Mth.clamp(totalDistance / 6.0D, 0.15D, 1.0D);
-            handOffset = handOffset.scale(distScale);
-            convergeDistance = Math.max(0.5D, totalDistance * 0.6D);
+            if (totalDistance < 1.0D) {
+                float distScale = (float) Mth.clamp(totalDistance / 1.0D, 0.2D, 1.0D);
+                handOffset = handOffset.scale(distScale);
+                convergeDistance = Math.max(0.2D, totalDistance * 0.5D);
+            }
         }
 
         if (convergeDistance < 1.0E-4D) convergeDistance = 1.0D;

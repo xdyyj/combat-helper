@@ -3,6 +3,7 @@ package com.xdyyj.autoattacker.ui;
 import com.xdyyj.autoattacker.AutoAttackerConfig;
 import com.xdyyj.autoattacker.AutoBallisticsTracker;
 import com.xdyyj.autoattacker.ClientEvents;
+import com.xdyyj.autoattacker.ClientModEvents;
 import com.xdyyj.autoattacker.weapon.FirearmAdapter;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -103,6 +104,13 @@ public class TacticalConsoleScreen extends Screen {
         } else {
             this.minecraft.setScreen(null);
         }
+    }
+
+    @Override
+    public void removed() {
+        AutoAttackerConfig.saveConfig();
+        AutoBallisticsTracker.saveToDiskImmediate();
+        super.removed();
     }
 
     private int getDrawerWidth() {
@@ -218,6 +226,26 @@ public class TacticalConsoleScreen extends Screen {
                     makeTooltip("自动切换目标 (Switch on Kill)",
                             "当前锁定目标死亡、脱离射程或进掩体后，毫秒级无缝自动锁定视野内下一名目标。",
                             "彻底消除击杀后手动寻敌按键的空窗期，实现连续收割。")));
+
+            currentItems.add(new ToggleItem("障碍物不脱锁",
+                    AutoAttackerConfig.LOCK_THROUGH_WALLS::get,
+                    val -> {
+                        AutoAttackerConfig.LOCK_THROUGH_WALLS.set(val);
+                        showToast("障碍物不脱锁: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("障碍物保持锁定 (Lock Through Obstacles)",
+                            "有方块、墙体或树木障碍物阻隔时持续保持锁定，不自动脱锁；",
+                            "只有当当前目标彻底死亡后，系统才会自动切换至下一个目标。")));
+
+            currentItems.add(new ToggleItem("允许甩脱锁定",
+                    AutoAttackerConfig.ENABLE_FLICK_BREAK_LOCK::get,
+                    val -> {
+                        AutoAttackerConfig.ENABLE_FLICK_BREAK_LOCK.set(val);
+                        showToast("允许甩脱锁定: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("允许鼠标甩脱锁定 (Mouse Flick Break-Lock)",
+                            "开启时：玩家通过物理快速甩动鼠标可强行解除当前锁定；",
+                            "关闭时：移动走位或晃动鼠标绝不脱锁，只能通过按键锁定键手动取消锁定。")));
 
             currentItems.add(new CycleItem("切靶策略",
                     () -> AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get().getDisplayName(),
@@ -495,6 +523,23 @@ public class TacticalConsoleScreen extends Screen {
                             "【双显】：同时开启 2D 准星标记与 3D 轨迹粒子；",
                             "【关闭】：隐藏所有落点预测画面。")));
 
+            currentItems.add(new CycleItem("弓弩弹道",
+                    () -> AutoAttackerConfig.BOW_TRAJECTORY_MODE.get().getDisplayName(),
+                    () -> {
+                        AutoAttackerConfig.BowTrajectoryMode cur = AutoAttackerConfig.BOW_TRAJECTORY_MODE.get();
+                        AutoAttackerConfig.BowTrajectoryMode next =
+                                (cur == AutoAttackerConfig.BowTrajectoryMode.FULL_CHARGE)
+                                        ? AutoAttackerConfig.BowTrajectoryMode.DYNAMIC
+                                        : AutoAttackerConfig.BowTrajectoryMode.FULL_CHARGE;
+                        AutoAttackerConfig.BOW_TRAJECTORY_MODE.set(next);
+                        AutoAttackerConfig.saveConfig();
+                        showToast("弓弩弹道模式: " + next.getDisplayName());
+                    },
+                    makeTooltip("弓弩弹道显示模式",
+                            "设置使用弓弩等蓄力武器时的弹道预测计算基准。",
+                            "【仅显示满弓抛物线】：始终按满弓最大射程（3.0 初速）模拟，拉弓时不缩回脚下，方便蓄力前提前预瞄；",
+                            "【动态抛物线】：根据当前实际拉弓蓄力进度实时伸缩弹道。")));
+
             currentItems.add(new ToggleItem("仅手持显示",
                     AutoAttackerConfig.HUD_ONLY_WHEN_HOLDING_BOW::get,
                     val -> {
@@ -529,16 +574,26 @@ public class TacticalConsoleScreen extends Screen {
 
             currentItems.add(new HeaderItem("// 悬浮小窗"));
 
-            currentItems.add(new ToggleItem("U键小窗",
-                    AutoAttackerConfig.ENABLE_DEBUG_OVERLAY::get,
+            currentItems.add(new ToggleItem(
+                    () -> "自动关闭小窗",
+                    AutoAttackerConfig.AUTO_CLOSE_OVERLAY::get,
                     val -> {
-                        AutoAttackerConfig.ENABLE_DEBUG_OVERLAY.set(val);
-                        showToast("悬浮小窗: " + (val ? "开启" : "关闭"));
+                        AutoAttackerConfig.AUTO_CLOSE_OVERLAY.set(val);
+                        if (val && !TacticalDebugPanel.isControlActive) {
+                            TacticalDebugPanel.isVisible = false;
+                        } else if (!val) {
+                            TacticalDebugPanel.isVisible = true;
+                        }
+                        AutoAttackerConfig.saveConfig();
+                        showToast("自动关闭小窗: " + (val ? "开启" : "关闭"));
                     },
-                    makeTooltip("U键悬浮监视小窗",
-                            "实时弹道参数 HUD 监控窗口。",
-                            "在屏幕左上角显示当前武器初速、重力、飞行时间及蓄力状态等底层物理数据。",
-                            "在游戏中随时按 U 键即可快速切换小窗显隐。")));
+                    () -> {
+                        String keyName = ClientModEvents.DEBUG_PANEL_KEY.getTranslatedKeyMessage().getString();
+                        return makeTooltip("自动关闭小窗 (Auto-Close)",
+                                "控制悬浮监视小窗在退出调整时是否自动关闭隐藏。",
+                                "§a开启时§7：退出调整控制态后自动关闭小窗，不常驻显示，游戏视野保持干净；随时按 " + keyName + " 键可呼出调整；",
+                                "§e关闭时§7：小窗将常驻显示在屏幕上，实时监控武器初速、重力与落点等物理数据。");
+                    }));
 
             currentItems.add(new ButtonItem("重置小窗位置到左上角", () -> {
                 TacticalDebugPanel.setPosition(12, 36);
@@ -1248,6 +1303,8 @@ public class TacticalConsoleScreen extends Screen {
             AutoAttackerConfig.AIM_PREDICT_BLEND.set(1.0);
             AutoAttackerConfig.AIM_PREDICT_SMOOTH.set(0.5);
             AutoAttackerConfig.AIM_PREDICT_MAX_DIST.set(60.0);
+            AutoAttackerConfig.LOCK_THROUGH_WALLS.set(false);
+            AutoAttackerConfig.ENABLE_FLICK_BREAK_LOCK.set(true);
             AutoAttackerConfig.ENABLE_LEAD_INDICATOR.set(true);
             AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD.set(false);
             AutoAttackerConfig.ENABLE_ANTI_RECOIL.set(false);
@@ -1255,10 +1312,12 @@ public class TacticalConsoleScreen extends Screen {
         } else if (currentTab == 1) {
             AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW.set(true);
             AutoAttackerConfig.TRAJECTORY_STYLE.set(AutoAttackerConfig.TrajectoryStyle.PARTICLE_CHAIN);
+            AutoAttackerConfig.BOW_TRAJECTORY_MODE.set(AutoAttackerConfig.BowTrajectoryMode.FULL_CHARGE);
             AutoAttackerConfig.HUD_ONLY_WHEN_HOLDING_BOW.set(true);
             AutoAttackerConfig.SHOW_DISTANCE.set(true);
             AutoAttackerConfig.SHOW_HEALTH_BAR.set(true);
             AutoAttackerConfig.ENABLE_DEBUG_OVERLAY.set(true);
+            AutoAttackerConfig.AUTO_CLOSE_OVERLAY.set(true);
             showToast("弹道设置已恢复默认");
         } else if (currentTab == 2) {
             AutoBallisticsTracker.clearAllCache();
@@ -1468,17 +1527,29 @@ public class TacticalConsoleScreen extends Screen {
     }
 
     public static class ToggleItem extends UIItem {
-        private final String label;
+        private final Supplier<String> labelSupplier;
         private final Supplier<Boolean> getter;
         private final Consumer<Boolean> setter;
-        private final List<Component> tooltip;
+        private final Supplier<List<Component>> tooltipSupplier;
 
         ToggleItem(String label, Supplier<Boolean> getter, Consumer<Boolean> setter, List<Component> tooltip) {
-            this.label = label;
+            this(() -> label, getter, setter, () -> tooltip);
+        }
+
+        ToggleItem(Supplier<String> labelSupplier, Supplier<Boolean> getter, Consumer<Boolean> setter, Supplier<List<Component>> tooltipSupplier) {
+            this.labelSupplier = labelSupplier;
             this.getter = getter;
             this.setter = setter;
-            this.tooltip = tooltip;
+            this.tooltipSupplier = tooltipSupplier;
             this.h = 22;
+        }
+
+        public String getLabel() {
+            return labelSupplier != null ? labelSupplier.get() : "";
+        }
+
+        public List<Component> getTooltip() {
+            return tooltipSupplier != null ? tooltipSupplier.get() : Collections.emptyList();
         }
 
         @Override
@@ -1488,15 +1559,20 @@ public class TacticalConsoleScreen extends Screen {
 
             drawCardFrame(graphics, hovered);
 
-            graphics.drawString(font, label, x + 6, y + 7, 0xFFF0F6FC, false);
+            String lbl = getLabel();
+            graphics.drawString(font, lbl, x + 6, y + 7, 0xFFF0F6FC, false);
 
             // (i) 徽章渲染
-            drawInfoBadge(graphics, font, label, tooltip, mouseX, mouseContentY, realMouseY, screen, 5, 2);
+            drawInfoBadge(graphics, font, lbl, getTooltip(), mouseX, mouseContentY, realMouseY, screen, 5, 2);
 
             int sw = 28;
             int sh = 13;
             int sx = x + w - sw - 6;
             int sy = y + 4;
+
+            // 明确的文字状态指示 (开启 / 关闭)，与开关色彩严格呼应，彻底杜绝无区别疑惑
+            String statusText = active ? "§a开启" : "§7关闭";
+            graphics.drawString(font, statusText, sx - font.width(statusText) - 6, sy + 3, active ? 0xFF3FB950 : 0xFF8B949E, false);
 
             graphics.fill(sx, sy, sx + sw, sy + sh, active ? 0xFF238636 : 0xFF21262D);
             graphics.renderOutline(sx, sy, sw, sh, active ? 0xFF3FB950 : 0x33FFFFFF);
@@ -1508,7 +1584,7 @@ public class TacticalConsoleScreen extends Screen {
 
         @Override
         boolean mouseClicked(double mouseX, double mouseY, int button) {
-            if (isInfoBadgeClicked(mouseX, mouseY, label, 5)) {
+            if (isInfoBadgeClicked(mouseX, mouseY, getLabel(), 5)) {
                 return true; // 仅供查看 Tooltip，不触发切换
             }
             setter.accept(!getter.get());
@@ -1547,9 +1623,24 @@ public class TacticalConsoleScreen extends Screen {
             int cy = y + 3;
 
             boolean btnHov = mouseX >= cx && mouseX <= cx + cw && mouseContentY >= cy && mouseContentY <= cy + ch;
+            
+            // 针对不同模式给予明确的高亮色彩反馈
+            int borderCol;
+            int textCol;
+            if ("仅显示满弓抛物线".equals(curVal)) {
+                borderCol = btnHov ? 0xFF58A6FF : 0xFF388BFD;
+                textCol = btnHov ? 0xFFFFFFFF : 0xFF79C0FF;
+            } else if ("动态抛物线".equals(curVal)) {
+                borderCol = btnHov ? 0xFFF0883E : 0xFFD29922;
+                textCol = btnHov ? 0xFFFFFFFF : 0xFFE3B341;
+            } else {
+                borderCol = btnHov ? 0xFF58A6FF : 0x33FFFFFF;
+                textCol = btnHov ? 0xFF58A6FF : 0xFFC9D1D9;
+            }
+
             graphics.fill(cx, cy, cx + cw, cy + ch, btnHov ? 0xFF2B313A : 0xFF21262D);
-            graphics.renderOutline(cx, cy, cw, ch, btnHov ? 0xFF58A6FF : 0x33FFFFFF);
-            graphics.drawCenteredString(font, curVal, cx + cw / 2, cy + 4, btnHov ? 0xFF58A6FF : 0xFFC9D1D9);
+            graphics.renderOutline(cx, cy, cw, ch, borderCol);
+            graphics.drawCenteredString(font, curVal, cx + cw / 2, cy + 4, textCol);
         }
 
         @Override

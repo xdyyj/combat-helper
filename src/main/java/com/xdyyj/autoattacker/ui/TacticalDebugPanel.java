@@ -34,11 +34,26 @@ public class TacticalDebugPanel {
 
     public static int panelX = 10;
     public static int panelY = 30;
+    private static boolean positionInitialized = false;
     private static boolean isDragging = false;
     private static int dragOffsetX = 0;
     private static int dragOffsetY = 0;
 
+    public static void initPosition() {
+        if (!positionInitialized) {
+            positionInitialized = true;
+            try {
+                if (AutoAttackerConfig.OVERLAY_POS_X != null && AutoAttackerConfig.OVERLAY_POS_Y != null) {
+                    panelX = AutoAttackerConfig.OVERLAY_POS_X.get();
+                    panelY = AutoAttackerConfig.OVERLAY_POS_Y.get();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
     public static void setPosition(int x, int y) {
+        positionInitialized = true;
         panelX = x;
         panelY = y;
         AutoAttackerConfig.OVERLAY_POS_X.set(x);
@@ -138,6 +153,7 @@ public class TacticalDebugPanel {
         Minecraft mc = Minecraft.getInstance();
         if (!isControlActive) {
             if (mc.screen == null) {
+                isVisible = true;
                 mc.setScreen(new TacticalControlScreen());
                 isControlActive = true;
             }
@@ -147,18 +163,25 @@ public class TacticalDebugPanel {
             }
             isControlActive = false;
             isDragging = false;
+            if (AutoAttackerConfig.AUTO_CLOSE_OVERLAY.get()) {
+                isVisible = false;
+            }
             AutoBallisticsTracker.saveToDiskImmediate();
             flushPendingConfigSave();
         }
     }
 
     public static void ensurePosition(int screenWidth, int screenHeight) {
+        initPosition();
         panelX = Math.max(0, Math.min(panelX, screenWidth - PANEL_WIDTH));
         panelY = Math.max(0, Math.min(panelY, screenHeight - PANEL_HEIGHT));
     }
 
     public static boolean isMouseOverPanel(double mouseX, double mouseY) {
-        if (!isVisible) return false;
+        initPosition();
+        if (!isVisible || !AutoAttackerConfig.ENABLE_MOD.get()) return false;
+        if (AutoAttackerConfig.AUTO_CLOSE_OVERLAY.get() && !isControlActive) return false;
+        if (!AutoAttackerConfig.ENABLE_DEBUG_OVERLAY.get() && !isControlActive) return false;
         return mouseX >= panelX && mouseX <= panelX + PANEL_WIDTH && mouseY >= panelY && mouseY <= panelY + PANEL_HEIGHT;
     }
 
@@ -171,7 +194,10 @@ public class TacticalDebugPanel {
     }
 
     public static void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        if (!isVisible) return;
+        initPosition();
+        if (!isVisible || !AutoAttackerConfig.ENABLE_MOD.get()) return;
+        if (AutoAttackerConfig.AUTO_CLOSE_OVERLAY.get() && !isControlActive) return;
+        if (!AutoAttackerConfig.ENABLE_DEBUG_OVERLAY.get() && !isControlActive) return;
         Minecraft mc = Minecraft.getInstance();
         Player player = mc.player;
         if (player == null || mc.level == null) return;
@@ -281,8 +307,9 @@ public class TacticalDebugPanel {
         graphics.fill(configX + 2, btnY + 5, configX + btnSize - 2, btnY + 6, barCol);
         graphics.fill(configX + 2, btnY + 8, configX + btnSize - 2, btnY + 9, barCol);
 
-        // 关闭按钮 x
-        boolean closeHov = isControlActive && mouseX >= closeX && mouseX <= closeX + btnSize && mouseY >= btnY && mouseY <= btnY + btnSize;
+        // 关闭按钮 x (与扩展后的点击热区同步高亮)
+        boolean closeHov = isControlActive && mouseX >= panelX + PANEL_WIDTH - 18 && mouseX <= panelX + PANEL_WIDTH &&
+                           mouseY >= panelY && mouseY <= panelY + TITLE_BAR_HEIGHT;
         graphics.fill(closeX, btnY, closeX + btnSize, btnY + btnSize, closeHov ? 0xFF8A2424 : 0xFF1C1E24);
         graphics.renderOutline(closeX, btnY, btnSize, btnSize, closeHov ? 0xFFC93B3B : 0x22FFFFFF);
         graphics.drawCenteredString(font, "x", closeX + btnSize / 2, btnY + 1, closeHov ? 0xFFFFFFFF : 0xFFA0A5B2);
@@ -636,6 +663,12 @@ public class TacticalDebugPanel {
         boolean autoReload = AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD.get();
         String reloadDesc = (category == ClientEvents.WeaponCategory.GUN) ? "枪械空仓自动换弹" : "枪械空仓自动换弹 §8(枪械)";
         renderToggleSwitch(graphics, font, mouseX, mouseY, panelX + 6, curY, reloadDesc, autoReload);
+        curY += 12;
+
+        // 7. 弓弩弹道模式 (仅满弓 / 动态)
+        AutoAttackerConfig.BowTrajectoryMode bowMode = AutoAttackerConfig.BOW_TRAJECTORY_MODE.get();
+        boolean isFull = (bowMode == AutoAttackerConfig.BowTrajectoryMode.FULL_CHARGE);
+        renderToggleSwitch(graphics, font, mouseX, mouseY, panelX + 6, curY, isFull ? "弓弩弹道: §b仅满弓" : "弓弩弹道: §e动态", isFull);
         curY += 14;
 
         // 分割线
@@ -726,19 +759,20 @@ public class TacticalDebugPanel {
         boolean hovered = isControlActive && mouseX >= x && mouseX <= panelX + PANEL_WIDTH - 8 && mouseY >= y - 1 && mouseY <= y + 9;
         int trackW = 14;
         int trackH = 8;
-        int trackCol = checked ? 0xFF1F6FEB : (hovered ? 0xFF2D313D : 0xFF21242D);
-        int borderCol = checked ? 0xFF388BFD : 0x26FFFFFF;
+        int trackCol = checked ? 0xFF238636 : (hovered ? 0xFF2D313D : 0xFF1C1E24);
+        int borderCol = checked ? 0xFF3FB950 : (hovered ? 0x44FFFFFF : 0x22FFFFFF);
 
         graphics.fill(x, y, x + trackW, y + trackH, trackCol);
         graphics.renderOutline(x, y, trackW, trackH, borderCol);
 
         // 滑块
         int thumbX = checked ? (x + 7) : (x + 1);
-        int thumbCol = checked ? 0xFFFFFFFF : (hovered ? 0xFFB0B6C2 : 0xFF7D8392);
+        int thumbCol = checked ? 0xFFFFFFFF : (hovered ? 0xFFB0B6C2 : 0xFF585E6D);
         graphics.fill(thumbX, y + 1, thumbX + 6, y + trackH - 1, thumbCol);
 
-        // 标签文字
-        graphics.drawString(font, label, x + trackW + 5, y, hovered ? 0xFFFFFFFF : 0xFFCED3DC, false);
+        // 标签文字：开启态高亮白字，关闭态暗灰字，主次分明
+        int labelCol = checked ? (hovered ? 0xFFFFFFFF : 0xFFF0F6FC) : (hovered ? 0xFFCED3DC : 0xFF7D8392);
+        graphics.drawString(font, label, x + trackW + 5, y, labelCol, false);
     }
 
     private static void renderModernButton(GuiGraphics graphics, Font font, int mouseX, int mouseY, int x, int y, int w, int h, String text, int borderTint) {
@@ -771,7 +805,11 @@ public class TacticalDebugPanel {
             int configX = panelX + PANEL_WIDTH - 26;
             int btnY = panelY + 3;
 
-            if (mouseX >= closeX && mouseX <= closeX + btnSize && mouseY >= btnY && mouseY <= btnY + btnSize) {
+            // 扩展右上角关闭按钮的点击响应热区 (panelX + PANEL_WIDTH - 18 到 panelX + PANEL_WIDTH 全高)，彻底杜绝因判定区过小误触发拖拽导致"点击一次后需要再次点击才能关闭"
+            if (mouseX >= panelX + PANEL_WIDTH - 18 && mouseX <= panelX + PANEL_WIDTH && mouseY >= panelY && mouseY <= panelY + TITLE_BAR_HEIGHT) {
+                AutoAttackerConfig.ENABLE_DEBUG_OVERLAY.set(false);
+                isVisible = false;
+                AutoAttackerConfig.saveConfig();
                 toggleControl();
                 return true;
             }
@@ -1221,6 +1259,17 @@ public class TacticalDebugPanel {
                 setStatus("空仓自动换弹: " + (next ? "开启" : "关闭"));
                 return true;
             }
+            // 弓弩弹道模式 (仅满弓 / 动态)
+            y += 12;
+            if (mouseY >= y - 1 && mouseY <= y + 9 && mouseX >= panelX + 6 && mouseX <= panelX + PANEL_WIDTH - 6) {
+                AutoAttackerConfig.BowTrajectoryMode cur = AutoAttackerConfig.BOW_TRAJECTORY_MODE.get();
+                AutoAttackerConfig.BowTrajectoryMode next = (cur == AutoAttackerConfig.BowTrajectoryMode.FULL_CHARGE)
+                        ? AutoAttackerConfig.BowTrajectoryMode.DYNAMIC
+                        : AutoAttackerConfig.BowTrajectoryMode.FULL_CHARGE;
+                AutoAttackerConfig.BOW_TRAJECTORY_MODE.set(next);
+                setStatus("弓弩弹道模式: " + (next == AutoAttackerConfig.BowTrajectoryMode.FULL_CHARGE ? "§b仅显示满弓" : "§e动态抛物线"));
+                return true;
+            }
 
             // 重置基准
             int y6 = y + 19;
@@ -1363,6 +1412,7 @@ public class TacticalDebugPanel {
             isDragging = false;
             AutoAttackerConfig.OVERLAY_POS_X.set(panelX);
             AutoAttackerConfig.OVERLAY_POS_Y.set(panelY);
+            requestConfigSave();
             return true;
         }
         return false;
@@ -1403,7 +1453,13 @@ public class TacticalDebugPanel {
 
         @Override
         public void removed() {
+            isControlActive = false;
+            isDragging = false;
+            if (AutoAttackerConfig.AUTO_CLOSE_OVERLAY.get()) {
+                isVisible = false;
+            }
             AutoBallisticsTracker.saveToDiskImmediate();
+            flushPendingConfigSave();
             super.removed();
         }
 
@@ -1415,6 +1471,11 @@ public class TacticalDebugPanel {
         @Override
         public boolean mouseClicked(double mouseX, double mouseY, int button) {
             if (TacticalDebugPanel.mouseClicked(mouseX, mouseY, button)) {
+                return true;
+            }
+            // 点击小窗外部任意游戏画面，自动退出控制态并恢复游戏视角 (杜绝需要再次点击才能关闭)
+            if (!TacticalDebugPanel.isMouseOverPanel(mouseX, mouseY)) {
+                TacticalDebugPanel.toggleControl();
                 return true;
             }
             return super.mouseClicked(mouseX, mouseY, button);
@@ -1447,6 +1508,20 @@ public class TacticalDebugPanel {
         @Override
         public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
             if (keyCode == GLFW.GLFW_KEY_ESCAPE || com.xdyyj.autoattacker.ClientModEvents.DEBUG_PANEL_KEY.matches(keyCode, scanCode)) {
+                TacticalDebugPanel.toggleControl();
+                return true;
+            }
+            // 玩家触发移动键、跳跃、潜行或攻击使用按键时，无缝自动关闭小窗控制态
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.options.keyUp.matches(keyCode, scanCode) ||
+                mc.options.keyDown.matches(keyCode, scanCode) ||
+                mc.options.keyLeft.matches(keyCode, scanCode) ||
+                mc.options.keyRight.matches(keyCode, scanCode) ||
+                mc.options.keyJump.matches(keyCode, scanCode) ||
+                mc.options.keyShift.matches(keyCode, scanCode) ||
+                mc.options.keySprint.matches(keyCode, scanCode) ||
+                mc.options.keyAttack.matches(keyCode, scanCode) ||
+                mc.options.keyUse.matches(keyCode, scanCode)) {
                 TacticalDebugPanel.toggleControl();
                 return true;
             }

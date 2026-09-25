@@ -57,6 +57,8 @@ public class ClientEvents {
 
     // --- 目标锁定机制核心 ---
     private LivingEntity currentTarget = null;
+    private boolean isManualLocked = false; // 是否由玩家通过快捷键手动锁定 (具有极高粘性，不轻易脱锁)
+    private boolean manualLockCancelled = false; // 玩家是否通过快捷键显式手动取消了锁定 (挂起后台自动自吸)
     private LivingEntity autoLockHoverTarget = null;
     private int autoLockHoverTicks = 0;
     private boolean wasLockKeyDown = false;
@@ -66,6 +68,14 @@ public class ClientEvents {
     private int gunReleaseCoolTicks = 0;
     private long lastGunShootTime = 0L;
     private static final int MAX_LOST_GRACE_TICKS = 20; // 视线丢失 20 tick (1秒) 宽容期
+
+    // --- 目标切换平滑过渡器 (Target-Switch Transit) ---
+    private final class TargetSwitchTransit {
+        boolean active = false;
+        long startNanos = 0L;
+    }
+    private final TargetSwitchTransit targetSwitchTransit = new TargetSwitchTransit();
+    private static final long TARGET_SWITCH_TRANSIT_DURATION_NANOS = 280_000_000L; // 280ms 换目标电影级平滑过渡窗口
 
     // --- 枪械自动换弹节流控制与死锁锁止 (Throttled Auto-Reload & Lockout) ---
     private long lastAutoReloadCheckTime = 0L;
@@ -77,6 +87,12 @@ public class ClientEvents {
     private static final int MAX_RELOAD_RETRIES = 3;
 
     // --- 鼠标死区与目标切换机制 (Mouse Deadzone & Flick Switch) ---
+    // 物理硬件鼠标输入采样 (GLFW Raw Cursor Delta)
+    // 彻底解耦移动与第三人称相机旋转，杜绝走位晃动导致的误脱锁
+    private double lastRawMouseX = 0.0;
+    private double lastRawMouseY = 0.0;
+    private boolean hasValidRawMouse = false;
+
     private float mouseDeflectionYaw = 0f;
     private float mouseDeflectionPitch = 0f;
     // 鼠标瞬时活跃度：与上面的累积甩枪量相互独立。
@@ -253,6 +269,10 @@ public class ClientEvents {
 
     public void clearSessionState() {
         this.currentTarget = null;
+        this.isManualLocked = false;
+        this.manualLockCancelled = false;
+        this.targetSwitchTransit.active = false;
+        this.hasValidRawMouse = false;
         this.autoLockHoverTarget = null;
         this.autoLockHoverTicks = 0;
         this.lastTrackedTarget = null;
@@ -304,7 +324,9 @@ public class ClientEvents {
         Minecraft mc = Minecraft.getInstance();
         if (event.getOverlay() == VanillaGuiOverlay.HOTBAR.type() && mc.screen == null) {
             TrajectoryRenderer.renderHudReticle(event.getGuiGraphics(), event.getPartialTick());
-            TacticalDebugPanel.render(event.getGuiGraphics(), event.getPartialTick());
+            if (AutoAttackerConfig.ENABLE_MOD.get() && !AutoAttackerConfig.AUTO_CLOSE_OVERLAY.get() && AutoAttackerConfig.ENABLE_DEBUG_OVERLAY.get()) {
+                TacticalDebugPanel.render(event.getGuiGraphics(), event.getPartialTick());
+            }
         }
     }
 
@@ -365,6 +387,10 @@ public class ClientEvents {
                             InteractionHand hand = player.getUsedItemHand();
 
                             if (currentTarget != null && currentTarget.isAlive()) {
+                                if (!hasLineOfSightMultiPoint(player, currentTarget)) {
+                                    // 目标处于掩体障碍物之后：保持满蓄力瞄准，静待露头，不朝墙面放空箭
+                                    return;
+                                }
                                 AutoBallisticsTracker.BallisticsProfile profile = AutoBallisticsTracker.getProfile(itemInUse);
                                 Vec3 eye = player.getEyePosition();
                                 double targetDistXZ = Math.hypot(currentTarget.getX() - eye.x, currentTarget.getZ() - eye.z);
@@ -600,6 +626,10 @@ public class ClientEvents {
             }
 
             // --- 2. 目标锁定触发逻辑 (3大自动搜索模式与智能自动切靶) ---
+            boolean clicked = false;
+            while (ClientModEvents.LOCK_ON_KEY.consumeClick()) {
+                clicked = true;
+            }
             boolean isKeyDown = ClientModEvents.LOCK_ON_KEY.isDown();
             boolean isToggleMode = AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.TOGGLE;
             boolean isHoldingBow = isRangedWeapon(player.getMainHandItem()) || isRangedWeapon(player.getOffhandItem());
@@ -616,24 +646,56 @@ public class ClientEvents {
             if (AutoAttackerConfig.ENABLE_AIM_ASSIST.get()) {
                 AutoAttackerConfig.AutoLockMode lockMode = AutoAttackerConfig.AUTO_LOCK_MODE.get();
 
-                // 2.1 手动快捷键交互 (按键锁定 / 手动解除锁定)
-                if (isKeyDown && !wasLockKeyDown) {
-                    if (currentTarget != null) {
-                        currentTarget = null;
-                        autoLockHoverTarget = null;
-                        autoLockHoverTicks = 0;
-                        lastSwitchTime = System.currentTimeMillis() + 800L; // 手动脱锁赋予 800ms 静默期，避免瞬间重吸
+                // 2.1 手动快捷键交互 (按键锁定 / 按键取消锁定 - 纯粹二元开关)
+                boolean keyTriggered = clicked || (isKeyDown && !wasLockKeyDown);
+                if (keyTriggered) {
+                    if (isToggleMode) {
+                        // 切换模式 (TOGGLE)：
+                        if (currentTarget != null) {
+                            // 状态 1：当前已有锁定 -> 必定且只做「取消当前锁定」
+                            currentTarget = null;
+                            isManualLocked = false;
+                            manualLockCancelled = true; // 显式取消锁定，挂起后台自动自吸
+                            autoLockHoverTarget = null;
+                            autoLockHoverTicks = 0;
+                            lastSwitchTime = System.currentTimeMillis() + 600L;
+                            TacticalDebugPanel.setStatus("取消锁定");
+                        } else {
+                            // 状态 2：当前无锁定 -> 必定且只做「搜索并锁定」
+                            manualLockCancelled = false;
+                            LivingEntity target = getPrioritizedTarget(player, searchRange, 75.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
+                            if (target != null) {
+                                currentTarget = target;
+                                isManualLocked = true;
+                                lastSwitchTime = System.currentTimeMillis();
+                                TacticalDebugPanel.setStatus("按键锁定: " + target.getType().getDescription().getString());
+                            } else {
+                                TacticalDebugPanel.setStatus("未发现视野内目标");
+                            }
+                        }
                     } else {
-                        currentTarget = getPrioritizedTarget(player, searchRange, 60.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
+                        // 长按模式 (HOLD) 按下触发：执行搜索锁定
+                        manualLockCancelled = false;
+                        LivingEntity target = getPrioritizedTarget(player, searchRange, 75.0f, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
+                        if (target != null) {
+                            currentTarget = target;
+                            isManualLocked = true;
+                            lastSwitchTime = System.currentTimeMillis();
+                            TacticalDebugPanel.setStatus("长按锁定: " + target.getType().getDescription().getString());
+                        }
                     }
-                } else if (!isToggleMode && !isKeyDown && lockMode == AutoAttackerConfig.AutoLockMode.OFF) {
-                    // 长按模式下松开按键脱锁 (仅当自动索敌关闭时)
-                    currentTarget = null;
+                } else if (!isToggleMode && !isKeyDown) {
+                    // 长按模式下松开按键：必定且只做取消锁定
+                    if (currentTarget != null && isManualLocked) {
+                        currentTarget = null;
+                        isManualLocked = false;
+                        TacticalDebugPanel.setStatus("释放取消锁定");
+                    }
                 }
                 wasLockKeyDown = isKeyDown;
 
                 // 2.2 自动索敌三种模式执行
-                if (currentTarget == null && System.currentTimeMillis() > lastSwitchTime) {
+                if (currentTarget == null && System.currentTimeMillis() > lastSwitchTime && !manualLockCancelled) {
                     switch (lockMode) {
                         case ALWAYS -> {
                             // 模式 2: 始终自动锁定 (手持武器时生效，视角角度可调)
@@ -685,53 +747,84 @@ public class ClientEvents {
                     boolean isInvalid = !isValidTarget(player, currentTarget);
                     boolean isOutOfRange = currentTarget.level() != player.level() || currentTarget.distanceToSqr(player) > maxLockDist * maxLockDist;
 
-                    // 自动转火(enableAutoSwitchTarget)是独立开关，只要它开启就生效，
-                    // 不因 autoLockMode 而改变存在性 —— 避免静默禁用用户已开启的功能。
                     boolean autoSwitchAllowed = AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get();
+                    boolean lockThroughWalls = AutoAttackerConfig.LOCK_THROUGH_WALLS.get();
 
-                    if (isInvalid || isOutOfRange) {
-                        // 「目标已失效」(死亡/移除/变友军/旁观/进排除名单) 属确定性失效，立即处理；
-                        // 仅「超距」给宽容期 —— 目标在射程边缘来回移动会反复越界，零宽容会使锁定闪断。
-                        boolean hardInvalid = isInvalid;
-                        if (hardInvalid) {
+                    if (lockThroughWalls) {
+                        // 【障碍物不脱锁，只有目标死亡后才能自动切换目标】
+                        // 1. 只有当前目标彻底死亡/失效 (血量 <= 0 或从世界移除)，才触发自动切靶
+                        boolean isDead = !currentTarget.isAlive() || currentTarget.isRemoved() || currentTarget.getHealth() <= 0.0f;
+                        if (isDead || isInvalid) {
                             if (autoSwitchAllowed) {
-                                // 目标已确定性失效：属于「必须换」，不加收益门槛
                                 currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
                             } else {
                                 currentTarget = null;
                             }
                             lostTargetGraceTicks = 0;
-                        } else {
+                        } else if (isOutOfRange) {
+                            // 若严重超距（离开维度或远超出射程），给予平滑宽容判定
                             lostTargetGraceTicks++;
-                            if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
+                            if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS * 2) {
                                 if (autoSwitchAllowed) {
-                                    // 目标持续超距：同属「必须换」，不加收益门槛
                                     currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
                                 } else {
                                     currentTarget = null;
                                 }
                                 lostTargetGraceTicks = 0;
                             }
-                        }
-                    } else if (!hasLineOfSightMultiPoint(player, currentTarget)) {
-                        lostTargetGraceTicks++;
-                        if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
-                            if (autoSwitchAllowed) {
-                                // 目标长时间隐蔽入掩体：当前目标已打不到，属于「必须换」，
-                                // 不加收益门槛，避免因候选评分略低就干脆解除锁定
-                                currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
-                                lostTargetGraceTicks = 0;
-                            } else {
-                                currentTarget = null;
-                                lostTargetGraceTicks = 0;
-                            }
+                        } else {
+                            // 目标未死且在射程内：无论是否有障碍物/墙体阻隔，完全重置脱锁计时，持续锁定！
+                            lostTargetGraceTicks = 0;
                         }
                     } else {
-                        lostTargetGraceTicks = 0;
+                        if (isInvalid || isOutOfRange) {
+                            // 「目标已失效」(死亡/移除/变友军/旁观/进排除名单) 属确定性失效，立即处理；
+                            // 仅「超距」给宽容期 —— 目标在射程边缘来回移动会反复越界，零宽容会使锁定闪断。
+                            boolean hardInvalid = isInvalid;
+                            if (hardInvalid) {
+                                if (autoSwitchAllowed) {
+                                    // 目标已确定性失效：属于「必须换」，不加收益门槛
+                                    currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
+                                } else {
+                                    currentTarget = null;
+                                }
+                                lostTargetGraceTicks = 0;
+                            } else {
+                                lostTargetGraceTicks++;
+                                if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
+                                    if (autoSwitchAllowed) {
+                                        // 目标持续超距：同属「必须换」，不加收益门槛
+                                        currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
+                                    } else {
+                                        currentTarget = null;
+                                    }
+                                    lostTargetGraceTicks = 0;
+                                }
+                            }
+                        } else if (!hasLineOfSightMultiPoint(player, currentTarget)) {
+                            lostTargetGraceTicks++;
+                            if (lostTargetGraceTicks > MAX_LOST_GRACE_TICKS) {
+                                if (autoSwitchAllowed) {
+                                    // 目标长时间隐蔽入掩体：当前目标已打不到，属于「必须换」，
+                                    // 不加收益门槛，避免因候选评分略低就干脆解除锁定
+                                    currentTarget = pickReplacementTarget(player, currentTarget, searchRange, AUTO_SWITCH_MAX_ANGLE);
+                                    lostTargetGraceTicks = 0;
+                                } else {
+                                    currentTarget = null;
+                                    lostTargetGraceTicks = 0;
+                                }
+                            }
+                        } else {
+                            lostTargetGraceTicks = 0;
+                        }
                     }
                 }
             } else {
                 currentTarget = null;
+            }
+
+            if (currentTarget == null) {
+                isManualLocked = false;
             }
 
             staticCurrentTarget = currentTarget;
@@ -766,17 +859,28 @@ public class ClientEvents {
 
                     if (velSampleCount == 1) {
                         smoothedTargetVelocity = measured;
-                    } else if (velSampleCount == 2) {
-                        int p1 = (velSampleIndex - 1 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        int p2 = (velSampleIndex - 2 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        smoothedTargetVelocity = velSamples[p1].scale(0.65).add(velSamples[p2].scale(0.35));
                     } else {
-                        int p1 = (velSampleIndex - 1 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        int p2 = (velSampleIndex - 2 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        int p3 = (velSampleIndex - 3 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
-                        smoothedTargetVelocity = velSamples[p1].scale(0.55)
-                                .add(velSamples[p2].scale(0.30))
-                                .add(velSamples[p3].scale(0.15));
+                        double smooth = Mth.clamp(AutoAttackerConfig.AIM_PREDICT_SMOOTH.get(), 0.0, 1.0);
+                        if (velSampleCount == 2) {
+                            int p1 = (velSampleIndex - 1 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                            int p2 = (velSampleIndex - 2 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                            double w1 = 1.0 - 0.70 * smooth;
+                            double w2 = 0.70 * smooth;
+                            smoothedTargetVelocity = velSamples[p1].scale(w1).add(velSamples[p2].scale(w2));
+                        } else {
+                            int p1 = (velSampleIndex - 1 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                            int p2 = (velSampleIndex - 2 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                            int p3 = (velSampleIndex - 3 + VEL_SAMPLE_CAP) % VEL_SAMPLE_CAP;
+                            // smooth = 0.5 (默认) -> w1=0.55, w2=0.30, w3=0.15 (保持原有调优基准)
+                            // smooth = 0.0 -> w1=1.00, w2=0.00, w3=0.00 (无滞后实时灵敏)
+                            // smooth = 1.0 -> w1=0.10, w2=0.60, w3=0.30 (最大平滑抗抖)
+                            double w1 = 1.0 - 0.90 * smooth;
+                            double w2 = 0.60 * smooth;
+                            double w3 = 0.30 * smooth;
+                            smoothedTargetVelocity = velSamples[p1].scale(w1)
+                                    .add(velSamples[p2].scale(w2))
+                                    .add(velSamples[p3].scale(w3));
+                        }
                     }
                     lastMeasuredVelocity = measured;
                 }
@@ -802,6 +906,35 @@ public class ClientEvents {
         Minecraft mc = Minecraft.getInstance();
         Player player = mc.player;
         if (player == null || mc.level == null || mc.isPaused()) return;
+
+        // 物理硬件鼠标输入采样 (GLFW Raw Cursor Delta)
+        // 从底层硬件采样鼠标位移并转换为等效视线偏角（度）。
+        // 角色走位跑跳、击退位移以及第三人称相机的弹簧阻尼晃动不产生任何鼠标硬件像素，
+        // 从而在物理层面将自瞄锁定与移动晃动彻底解耦，杜绝走位导致的误脱锁！
+        float mouseDeltaYaw = 0.0f;
+        float mouseDeltaPitch = 0.0f;
+        boolean mouseGrabbed = mc.mouseHandler.isMouseGrabbed();
+        if (mouseGrabbed) {
+            double curMouseX = mc.mouseHandler.xpos();
+            double curMouseY = mc.mouseHandler.ypos();
+            if (hasValidRawMouse) {
+                double rawDx = curMouseX - lastRawMouseX;
+                double rawDy = curMouseY - lastRawMouseY;
+                double sens = mc.options.sensitivity().get() * 0.6D + 0.2D;
+                double degPerPixel = sens * sens * sens * 1.2D;
+                mouseDeltaYaw = (float) (rawDx * degPerPixel);
+                mouseDeltaPitch = (float) (rawDy * degPerPixel);
+                if (mc.options.invertYMouse().get()) {
+                    mouseDeltaPitch = -mouseDeltaPitch;
+                }
+            } else {
+                hasValidRawMouse = true;
+            }
+            lastRawMouseX = curMouseX;
+            lastRawMouseY = curMouseY;
+        } else {
+            hasValidRawMouse = false;
+        }
 
         // 换武器检测必须最先执行：保证基线始终跟随实际手持物，
         // 否则早退分支会让 lastSwapWatchItem 陈旧，恢复后误判为"刚换武器"。
@@ -833,6 +966,8 @@ public class ClientEvents {
             staticLastPredictedAim = null;
             wasLockedLastFrame = false;
             lastTrackedTarget = null;
+            isManualLocked = false;
+            targetSwitchTransit.active = false;
             lastDestYaw = Float.NaN;
             lastDestPitch = Float.NaN;
             selfAppliedYaw = 0f;
@@ -857,39 +992,17 @@ public class ClientEvents {
         if (!(deltaSec > 0f)) deltaSec = 1.0f / 60.0f;   // 含 NaN 判断
         if (deltaSec > 0.25f) deltaSec = 0.25f;
 
-        applyAimAssist(player, currentTarget, event.renderTickTime, deltaSec, isShoulderNow);
+        applyAimAssist(player, currentTarget, event.renderTickTime, deltaSec, isShoulderNow, mouseDeltaYaw, mouseDeltaPitch);
     }
 
-    private void applyAimAssist(Player player, LivingEntity target, float partialTick, float deltaSec, boolean isShoulder) {
+    private void applyAimAssist(Player player, LivingEntity target, float partialTick, float deltaSec, boolean isShoulder, float mouseDeltaYaw, float mouseDeltaPitch) {
         Minecraft mc = Minecraft.getInstance();
 
         // --- 鼠标死区与目标切换机制 (Mouse Deadzone & Switch Logic) ---
         float curYaw = isShoulder ? ShoulderSurfingCompat.getCameraYaw() : player.getYRot();
         float curPitch = isShoulder ? ShoulderSurfingCompat.getCameraPitch() : player.getXRot();
         if (wasLockedLastFrame) {
-            // 剔除本模组上一帧自身写入的转动量：只有超出自身贡献的部分才是玩家真实鼠标输入。
-            // 未剔除时，压枪/吸附每帧的自转会被当成玩家甩枪 → userDamping 被自己压低 → 自阻尼闭环。
-            float mouseDeltaYaw = Mth.wrapDegrees(curYaw - lastLockedYaw) - selfAppliedYaw;
-            float mouseDeltaPitch = (curPitch - lastLockedPitch) - selfAppliedPitch;
-
-            // 自瞄是否正在主动追踪目标：上一帧仍有未完成的追踪缺口，或本帧已写入可观转动量。
-            boolean aimTrackingBusy =
-                    Math.abs(lastAimTrackingGapYaw) > AIM_TRACKING_BUSY_DEG
-                            || Math.abs(lastAimTrackingGapPitch) > AIM_TRACKING_BUSY_DEG
-                            || Math.abs(selfAppliedYaw) > AIM_TRACKING_BUSY_DEG
-                            || Math.abs(selfAppliedPitch) > AIM_TRACKING_BUSY_DEG;
-
-            // 自瞄正在追踪目标时，相机的转动主要由自瞄驱动而非玩家鼠标。
-            // 平滑跟踪必然存在「追赶滞后」——目标越快，滞后越大，残差也越大。
-            // 若把这份残差原样计入玩家偏转，就会出现「目标越快越容易越过死区而脱锁」。
-            // 注意不能整帧丢弃：那样自瞄一忙死区就永久失效，玩家将无法甩枪切目标/解锁。
-            // 故只对残差做限幅——保留玩家真实的大幅甩动，仅压制滞后造成的零头。
-            if (aimTrackingBusy) {
-                mouseDeltaYaw = Mth.clamp(mouseDeltaYaw, -DEADZONE_RESIDUAL_CLAMP_DEG, DEADZONE_RESIDUAL_CLAMP_DEG);
-                mouseDeltaPitch = Mth.clamp(mouseDeltaPitch, -DEADZONE_RESIDUAL_CLAMP_DEG, DEADZONE_RESIDUAL_CLAMP_DEG);
-            }
-
-            // 累计玩家施加的鼠标偏转位移 (供"是否切换目标"判定，需要保持住)
+            // 累计玩家通过物理硬件鼠标施加的偏转位移 (与角色移动走位、第三人称相机摇摆彻底解耦，纯净由物理鼠标驱动)
             mouseDeflectionYaw += mouseDeltaYaw;
             mouseDeflectionPitch += mouseDeltaPitch;
 
@@ -919,9 +1032,10 @@ public class ClientEvents {
                         : AutoAttackerConfig.AIM_ASSIST_RANGE.get();
 
                 // 「换一个目标」属于自动切换目标功能，必须由 enableAutoSwitchTarget 控制。
-                // 该开关关闭时不得把锁定换到别的目标上——否则玩家手动锁定的目标会被
-                // 旁边的敌人抢走。关闭时仅保留下方「甩脱解除锁定」，那才是玩家自己的操作。
-                LivingEntity switchTarget = AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get()
+                // 若开启了 LOCK_THROUGH_WALLS ("只有目标死亡后才能自动切换目标")，或当前为玩家主动按键手动锁定：
+                // 则当当前目标存活时，禁止因鼠标甩动而自动换到别的目标！
+                boolean allowSwitchWhileAlive = !AutoAttackerConfig.LOCK_THROUGH_WALLS.get() && !isManualLocked;
+                LivingEntity switchTarget = (allowSwitchWhileAlive && AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.get())
                         ? findSwitchTarget(player, target, searchDist, 75.0f)
                         : null;
                 // 还需新目标确有收益才切：仅有「另一个可见目标」不足以构成切换理由，
@@ -935,17 +1049,25 @@ public class ClientEvents {
                     mouseDeflectionPitch = 0f;
                     mouseActivity = 0f;
                     TacticalDebugPanel.setStatus("切换锁定: " + switchTarget.getType().getDescription().getString());
-                } else if (deflection >= deadzoneThreshold * 2.5) {
-                    // 若无其他目标且强力甩开视角 (>2.5倍阈值)，解脱锁定并给予静默期
-                    currentTarget = null;
-                    staticCurrentTarget = null;
-                    lastSwitchTime = now + 600L; // 给予 600ms 静默期，防止瞬间重新锁回
-                    mouseDeflectionYaw = 0f;
-                    mouseDeflectionPitch = 0f;
-                    mouseActivity = 0f;
-                    wasLockedLastFrame = false;
-                    TacticalDebugPanel.setStatus("甩脱视角: 已解除锁定");
-                    return;
+                } else {
+                    // 由「允许甩脱锁定」设置项严格管控：
+                    // 开启时：仅物理快速甩动鼠标超过阈值 (>3.5倍死区，约28°) 时强行解除锁定并给予静默期；
+                    // 关闭时：任何鼠标移动均绝不脱锁，只能通过按键或目标死亡取消锁定。
+                    // 且无论开或关，角色跑跳走位、第三人称视角晃动因无鼠标硬件像素输入，均物理保证 0 偏转、绝不脱锁！
+                    boolean canBreakLockByMouse = AutoAttackerConfig.ENABLE_FLICK_BREAK_LOCK.get();
+                    if (canBreakLockByMouse && deflection >= deadzoneThreshold * 3.5) {
+                        // 若无其他目标且强力甩开视角 (>3.5倍阈值，约28°~35°)，解脱锁定并给予静默期
+                        currentTarget = null;
+                        staticCurrentTarget = null;
+                        isManualLocked = false;
+                        lastSwitchTime = now + 600L; // 给予 600ms 静默期，防止瞬间重新锁回
+                        mouseDeflectionYaw = 0f;
+                        mouseDeflectionPitch = 0f;
+                        mouseActivity = 0f;
+                        wasLockedLastFrame = false;
+                        TacticalDebugPanel.setStatus("甩脱视角: 已解除锁定");
+                        return;
+                    }
                 }
             }
         }
@@ -954,7 +1076,7 @@ public class ClientEvents {
         staticSmoothedTargetVelocity = smoothedTargetVelocity;
 
         double px = Mth.lerp((double) partialTick, player.xo, player.getX());
-        double py = Mth.lerp((double) partialTick, player.yo, player.getY()) + player.getEyeHeight();
+        double py = Mth.lerp((double) partialTick, player.yo, player.getY()) + TrajectoryRenderer.getSmoothedEyeHeight(player);
         double pz = Mth.lerp((double) partialTick, player.zo, player.getZ());
 
         double tx = Mth.lerp((double) partialTick, target.xo, target.getX());
@@ -1128,6 +1250,12 @@ public class ClientEvents {
             if (Math.abs(kinematicCamPitch) > KINEMATIC_FEEDFORWARD_MAX_DEG) kinematicCamPitch = 0.0f;
             if (Math.abs(kinematicPlayerYaw) > KINEMATIC_FEEDFORWARD_MAX_DEG) kinematicPlayerYaw = 0.0f;
             if (Math.abs(kinematicPlayerPitch) > KINEMATIC_FEEDFORWARD_MAX_DEG) kinematicPlayerPitch = 0.0f;
+        } else {
+            // 目标发生了切换 (旧目标死亡切到新目标，或手动/自动重锁新目标)
+            if (lastTrackedTarget != null && lastTrackedTarget != target) {
+                targetSwitchTransit.active = true;
+                targetSwitchTransit.startNanos = System.nanoTime();
+            }
         }
         lastTrackedTarget = target;
         lastDestYaw = destYaw;
@@ -1231,6 +1359,18 @@ public class ClientEvents {
             }
         }
 
+        // 目标切换过渡期抑制：如果刚切换了目标 (280ms内)，防止开火后坐力 boost 将刚度拉到 0.95 导致首帧瞬移跳跃
+        if (targetSwitchTransit.active) {
+            long elapsed = System.nanoTime() - targetSwitchTransit.startNanos;
+            if (elapsed >= TARGET_SWITCH_TRANSIT_DURATION_NANOS || elapsed < 0L) {
+                targetSwitchTransit.active = false;
+            } else {
+                // 平滑转场期间，限制最大 factor 不超过 0.45，避免极端大加速度
+                factorPitch = Math.min(factorPitch, 0.45f);
+                factorYaw = Math.min(factorYaw, 0.45f);
+            }
+        }
+
         // 微小角距平滑阻尼 (Micro-angle Damping Buffer)，当视角与目标差角极小 (<0.03°) 时渐进衰减拉拽，彻底杜绝镜头高频震荡 (Jitter)
         float absDeltaCamY = Math.abs(deltaCamY);
         float absDeltaCamX = Math.abs(deltaCamX);
@@ -1253,6 +1393,18 @@ public class ClientEvents {
         float alphaX = 1.0f - (float) Math.pow(1.0 - fx, deltaSec * 20.0);
         float stepCamY = kinematicCamYaw + dampedCamDeltaY * alphaY;
         float stepCamX = kinematicCamPitch + dampedCamDeltaX * alphaX;
+
+        // 全局角速度硬限幅 (Slew-Rate Limiter)：
+        // 正常跟踪时，单帧最高允许转角对应 ~520°/s (60fps 下约为 8.6°/帧)；
+        // 目标切换过渡期内，单帧最高允许转角对应 ~360°/s (60fps 下约为 6.0°/帧)。
+        // 无论目标角差距有多大 (例如 80°~90°)，准星都会以极其平滑、均匀的电影级速度摇镜转过去，
+        // 物理上 100% 杜绝任何 1 帧跳跃闪现！
+        float safeDt = (deltaSec > 0f && deltaSec <= 0.25f) ? deltaSec : (1.0f / 60.0f);
+        float maxDegPerSec = targetSwitchTransit.active ? 360.0f : 520.0f;
+        float maxStepDeg = maxDegPerSec * safeDt;
+
+        stepCamY = Mth.clamp(stepCamY, -maxStepDeg, maxStepDeg);
+        stepCamX = Mth.clamp(stepCamX, -maxStepDeg, maxStepDeg);
 
         float newCamYaw = curCamYaw + stepCamY;
         float newCamPitch = Mth.clamp(curCamPitch + stepCamX, -89.5F, 89.5F);
@@ -1369,6 +1521,7 @@ public class ClientEvents {
 
         if (!changed) return;
 
+        manualLockCancelled = false; // 切换武器后恢复自动自瞄响应性
         swapTransit.active = true;
         swapTransit.startNanos = System.nanoTime();
         // 起点取"此刻的实际朝向"，保证视觉上从当前位置开始滑动。
@@ -1624,6 +1777,11 @@ public class ClientEvents {
      * 注意 current 传入的是已失效的目标，getPrioritizedTarget 会把它排除在候选之外。
      */
     private LivingEntity pickReplacementTarget(Player player, LivingEntity current, double range, float maxAngle) {
+        // 两级视野分层挑选：优先在更自然的视野锥 (55°) 内找怪，确保切靶舒适顺畅；
+        // 若前方无怪，再扩大至最大允许偏角搜寻侧向敌人，防止漏怪。
+        LivingEntity inner = getPrioritizedTarget(player, range, Math.min(maxAngle, 55.0f),
+                AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), current);
+        if (inner != null) return inner;
         return getPrioritizedTarget(player, range, maxAngle,
                 AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), current);
     }
@@ -2169,10 +2327,12 @@ public class ClientEvents {
      */
     private double smoothAimHeight(LivingEntity target, double rawHeight, float deltaSec, boolean advance) {
         if (smoothedAimHeightTarget != target) {
-            // 换了目标：直接从该目标的实际高度起步，不做跨目标滑移
             smoothedAimHeightTarget = target;
-            smoothedAimHeight = rawHeight;
-            return rawHeight;
+            // 换了目标：若旧目标高度有效且高度差在合理范围内 (<= 6.0格)，保留旧高度平滑过渡，杜绝垂直方向瞬间跳变！
+            if (Double.isNaN(smoothedAimHeight) || Math.abs(rawHeight - smoothedAimHeight) > 6.0) {
+                smoothedAimHeight = rawHeight;
+                return rawHeight;
+            }
         }
         if (Double.isNaN(smoothedAimHeight)) {
             smoothedAimHeight = rawHeight;
@@ -2183,9 +2343,9 @@ public class ClientEvents {
         }
 
         float dt = (deltaSec > 0f && deltaSec <= 0.25f) ? deltaSec : (1.0f / 60.0f);
-        // 每秒最多移动的高度(格/秒)。取值需在「切换肉眼可辨」与「不拖沓」之间平衡：
-        // 1.8 格/秒下，头↔躯干(约 0.5~1.0 格)约 0.3~0.6 秒走完。
-        double maxStep = AIM_HEIGHT_SMOOTH_RATE * dt;
+        // 每秒最多移动的高度(格/秒)。换目标过渡期提升至 4.0格/秒，保证迅速而平滑地收敛到新目标高度
+        double rate = targetSwitchTransit.active ? 4.0D : AIM_HEIGHT_SMOOTH_RATE;
+        double maxStep = rate * dt;
         double diff = rawHeight - smoothedAimHeight;
         if (Math.abs(diff) <= maxStep) {
             smoothedAimHeight = rawHeight;

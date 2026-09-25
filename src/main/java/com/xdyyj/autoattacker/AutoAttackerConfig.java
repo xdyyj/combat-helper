@@ -63,6 +63,8 @@ public class AutoAttackerConfig {
     public static final ForgeConfigSpec.EnumValue<AimLockType> AIM_LOCK_TYPE;
 
     public static final ForgeConfigSpec.BooleanValue ENABLE_AUTO_SWITCH_TARGET;
+    public static final ForgeConfigSpec.BooleanValue LOCK_THROUGH_WALLS;
+    public static final ForgeConfigSpec.BooleanValue ENABLE_FLICK_BREAK_LOCK;
     public enum SwitchPriority {
         FOV("准星优先"),
         DISTANCE("距离优先"),
@@ -140,7 +142,30 @@ public class AutoAttackerConfig {
     }
     public static final ForgeConfigSpec.EnumValue<TrajectoryStyle> TRAJECTORY_STYLE;
 
+    public enum BowTrajectoryMode {
+        FULL_CHARGE("仅满弓", "仅显示满弓抛物线"),
+        DYNAMIC("动态", "动态抛物线");
+
+        private final String shortName;
+        private final String displayName;
+
+        BowTrajectoryMode(String shortName, String displayName) {
+            this.shortName = shortName;
+            this.displayName = displayName;
+        }
+
+        public String getShortName() {
+            return shortName;
+        }
+
+        public String getDisplayName() {
+            return displayName;
+        }
+    }
+    public static final ForgeConfigSpec.EnumValue<BowTrajectoryMode> BOW_TRAJECTORY_MODE;
+
     public static final ForgeConfigSpec.BooleanValue ENABLE_DEBUG_OVERLAY;
+    public static final ForgeConfigSpec.BooleanValue AUTO_CLOSE_OVERLAY;
     public static final ForgeConfigSpec.BooleanValue HUD_ONLY_WHEN_HOLDING_BOW;
     public static final ForgeConfigSpec.BooleanValue ENABLE_TRAJECTORY_PREVIEW;
     public static final ForgeConfigSpec.BooleanValue SHOW_DISTANCE;
@@ -298,6 +323,16 @@ public class AutoAttackerConfig {
                 .translation("config.autoattacker.enable_auto_switch_target")
                 .define("enableAutoSwitchTarget", true);
 
+        LOCK_THROUGH_WALLS = BUILDER
+                .comment("Keep lock on target even when obstructed by walls/obstacles, and only switch target after current target dies.")
+                .translation("config.autoattacker.lock_through_walls")
+                .define("lockThroughWalls", false);
+
+        ENABLE_FLICK_BREAK_LOCK = BUILDER
+                .comment("Allow breaking lock by quickly flicking mouse away from target.")
+                .translation("config.autoattacker.enable_flick_break_lock")
+                .define("enableFlickBreakLock", true);
+
         AUTO_SWITCH_PRIORITY = BUILDER
                 .comment("Target selection priority when auto switching: FOV (closest to crosshair), DISTANCE (closest to player), or HEALTH (lowest health).")
                 .translation("config.autoattacker.auto_switch_priority")
@@ -357,6 +392,11 @@ public class AutoAttackerConfig {
                 .translation("config.autoattacker.enable_debug_overlay")
                 .define("enableDebugOverlay", true);
 
+        AUTO_CLOSE_OVERLAY = BUILDER
+                .comment("Automatically close the tactical debug panel overlay upon exiting control mode (not permanently displayed on HUD).")
+                .translation("config.autoattacker.auto_close_overlay")
+                .define("autoCloseOverlay", true);
+
         HUD_ONLY_WHEN_HOLDING_BOW = BUILDER
                 .comment("Only show tactical HUD when holding a bow or crossbow.")
                 .translation("config.autoattacker.hud_only_when_holding_bow")
@@ -381,6 +421,11 @@ public class AutoAttackerConfig {
                 .comment("Trajectory visualization style: BOTH (HUD Reticle + 3D Dot Chain), HUD_RETICLE (Plan A 2D Reticle), PARTICLE_CHAIN (Plan B 3D Chain), OFF (Disabled).")
                 .translation("config.autoattacker.trajectory_style")
                 .defineEnum("trajectoryStyle", TrajectoryStyle.PARTICLE_CHAIN);
+
+        BOW_TRAJECTORY_MODE = BUILDER
+                .comment("Bow trajectory preview mode: FULL_CHARGE (Always show full-draw trajectory), DYNAMIC (Dynamic charge trajectory).")
+                .translation("config.autoattacker.bow_trajectory_mode")
+                .defineEnum("bowTrajectoryMode", BowTrajectoryMode.FULL_CHARGE);
 
         ENABLE_LEAD_INDICATOR = BUILDER
                 .comment("Render predicted target interception box in world.")

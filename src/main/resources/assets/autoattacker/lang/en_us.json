@@ -44,7 +44,12 @@
     "config.autoattacker.Lock_On_Settings.tooltip": "Configure aim assist logic and visual feedback.",
     "config.autoattacker.target_part": "Aim Target Part",
     "config.autoattacker.target_part.tooltip": "Target body part for aim assist: HEAD (headshot priority), TORSO (body center), ADAPTIVE (smart distance switch).",
-    "config.autoattacker.List_Settings.tooltip": "Configure item and entity filtering rules.",
+    "config.autoattacker.auto_close_overlay": "Auto-Close Small Window",
+    "config.autoattacker.auto_close_overlay.tooltip": "Automatically hide the tactical debug panel when exiting adjustment mode. When ON, closes on exit and does not permanently show on HUD.",
+    "config.autoattacker.lock_through_walls": "Lock Through Obstacles",
+    "config.autoattacker.lock_through_walls.tooltip": "Maintain aim assist lock on target even when obstructed by walls, blocks, or trees. Only automatically switches to the next target after current target dies.",
+    "config.autoattacker.enable_flick_break_lock": "Allow Flick Break-Lock",
+    "config.autoattacker.enable_flick_break_lock.tooltip": "Allow breaking lock by quickly flicking mouse away from target. When enabled: player can deliberately flick mouse to force unlock; when disabled: movement or camera swinging will never drop lock, only manual key press or target death can unlock.",
     "key.categories.autoattacker": "Combat Helper",
     "key.autoattacker.lock_on": "Lock-On / Aim Assist",
     "key.autoattacker.debug_panel": "Tactical Monitor Panel"

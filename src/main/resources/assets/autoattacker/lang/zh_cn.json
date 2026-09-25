@@ -46,7 +46,12 @@
     "config.autoattacker.Lock_On_Settings.tooltip": "配置视角吸附、锁定逻辑以及视觉反馈效果。",
     "config.autoattacker.target_part": "瞄准锁定部位",
     "config.autoattacker.target_part.tooltip": "设置自瞄准星吸附的目标解算部位。HEAD（头部优先/爆头）、TORSO（躯干中心）、ADAPTIVE（智能自适应）。",
-    "config.autoattacker.List_Settings.tooltip": "配置针对物品和生物的黑白名单过滤逻辑。",
+    "config.autoattacker.auto_close_overlay": "自动关闭小窗",
+    "config.autoattacker.auto_close_overlay.tooltip": "控制悬浮监视小窗在退出调整时是否自动关闭隐藏。开启时退出即关闭，不常驻显示；关闭时常驻显示在屏幕上。",
+    "config.autoattacker.lock_through_walls": "障碍物不脱锁",
+    "config.autoattacker.lock_through_walls.tooltip": "有方块、墙体或树木障碍物阻隔时持续保持自瞄锁定，不自动脱锁；只有当当前目标彻底死亡后，系统才会自动切换至下一个目标。",
+    "config.autoattacker.enable_flick_break_lock": "允许甩脱锁定",
+    "config.autoattacker.enable_flick_break_lock.tooltip": "允许通过物理快速甩动鼠标解除当前锁定。开启时：玩家物理快速甩动鼠标可强行脱锁；关闭时：移动走位或晃动鼠标绝不脱锁，只能通过按键手动取消锁定。",
     "key.categories.autoattacker": "Combat Helper (战斗助手)",
     "key.autoattacker.lock_on": "锁定/吸附目标",
     "key.autoattacker.debug_panel": "战术监控面板 / 调试小窗"
