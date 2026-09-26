@@ -881,19 +881,6 @@ public final class AutoBallisticsTracker {
         return null;
     }
 
-    private static ItemStack getHeldBow(Player player) {
-        if (player.isUsingItem() && (ClientEvents.isBow(player.getUseItem()) || com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getUseItem()))) {
-            return player.getUseItem();
-        }
-        if (ClientEvents.isBow(player.getMainHandItem()) || com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getMainHandItem())) {
-            return player.getMainHandItem();
-        }
-        if (ClientEvents.isBow(player.getOffhandItem()) || com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getOffhandItem())) {
-            return player.getOffhandItem();
-        }
-        return ItemStack.EMPTY;
-    }
-
     // =========================================================================
     // 磁盘持久化 JSON 读写 (具备平滑迁移、权威预设回退、防写空截断与原子备份)
     // =========================================================================
