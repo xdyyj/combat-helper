@@ -14,6 +14,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -661,7 +662,7 @@ public class TacticalConsoleScreen extends Screen {
             Map<String, AutoBallisticsTracker.BallisticsProfile> cacheEntries = AutoBallisticsTracker.getCacheEntries();
             int totalEntries = cacheEntries.size();
 
-            currentItems.add(new HeaderItem("// 武器档案库 (已存 " + totalEntries + " 种)"));
+            currentItems.add(new HeaderItem("// 远程弹道特征库 (弓弩/枪械 - 已存 " + totalEntries + " 种)"));
 
             if (!isArchiveExpanded) {
                 // 默认折叠收缩状态 (零多余渲染消耗)
@@ -2151,8 +2152,17 @@ public class TacticalConsoleScreen extends Screen {
             String name = held.getHoverName().getString();
             graphics.drawString(font, name, x + 24, y + 5, 0xFFF0F6FC, false);
 
-            graphics.drawString(font, "§c[近战武器]  §e智能出刀蓄力CD已就绪", x + 24, y + 17, 0xFFFFFFFF, false);
-            graphics.drawString(font, "§7由近战引擎按攻速 CD 实时同步，无需抛物线弹道档案", x + 24, y + 29, 0xFF8B949E, false);
+            Minecraft mc = Minecraft.getInstance();
+            Player player = mc.player;
+            double attackDamage = 1.0;
+            double attackSpeed = 4.0;
+            if (player != null) {
+                attackDamage = player.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                attackSpeed = player.getAttributeValue(Attributes.ATTACK_SPEED);
+            }
+            String statStr = String.format(Locale.ROOT, "§c[近战兵刃]  §f伤害: %.1f  §b攻速: %.1f/s  §e智能出刀就绪", attackDamage, attackSpeed);
+            graphics.drawString(font, statStr, x + 24, y + 17, 0xFFFFFFFF, false);
+            graphics.drawString(font, "§7由近战智能打击引擎实时驱动，无需抛物线弹道档案", x + 24, y + 29, 0xFF8B949E, false);
         }
 
         @Override

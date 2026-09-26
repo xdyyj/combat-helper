@@ -11,6 +11,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagKey;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
@@ -18,10 +19,16 @@ import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.entity.projectile.Projectile;
+import net.minecraft.world.item.AxeItem;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.SpawnEggItem;
+import net.minecraft.world.item.SwordItem;
+import net.minecraft.world.item.TridentItem;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.fml.loading.FMLPaths;
@@ -225,6 +232,94 @@ public final class AutoBallisticsTracker {
     }
 
     /**
+     * 判断当前物品是否为具备弹道/飞行射击特征的远程武器 (枪械/弓/弩/三叉戟/配置远程)
+     * 明确拦截近战武器 (剑、斧、工具) 与实体刷怪蛋/方块等，防止误建弹道档案
+     */
+    public static boolean isRangedWeapon(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return false;
+        Item item = stack.getItem();
+        if (item instanceof SwordItem 
+                || item instanceof AxeItem 
+                || item instanceof SpawnEggItem 
+                || item instanceof BlockItem) {
+            return false;
+        }
+        if (stack.is(ItemTags.SWORDS) || stack.is(ItemTags.AXES)) {
+            return false;
+        }
+        if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(stack)) {
+            return true;
+        }
+        if (ClientEvents.isBow(stack)) {
+            return true;
+        }
+        if (item instanceof TridentItem) {
+            return true;
+        }
+        ResourceLocation reg = ForgeRegistries.ITEMS.getKey(item);
+        if (reg != null && DEFAULT_FACTORY_PRESETS.containsKey(reg.toString())) {
+            return true;
+        }
+        if (AutoAttackerConfig.bowGravityMap.containsKey(item) || AutoAttackerConfig.bowSpeedMap.containsKey(item)) {
+            return true;
+        }
+        if (ClientEvents.isMelee(stack)) {
+            return false;
+        }
+        return false;
+    }
+
+    /**
+     * 校验档案指纹是否属于非法条目 (如历史迁移残留的现代枪械占位、剑/斧/召星者/刷怪蛋/假人等近战与非武器条目)
+     */
+    public static boolean isInvalidBallisticSignature(String key) {
+        if (key == null || key.isEmpty()) return true;
+        String lowerKey = key.toLowerCase(Locale.ROOT);
+        // 1. 明确的垃圾/碎片/非弹道标记
+        if (lowerKey.contains("modern_kinetic_gun#")
+                || lowerKey.contains("target_dummy")
+                || lowerKey.contains("spawn_egg")) {
+            return true;
+        }
+
+        // 2. 提取基础物品 Registry ID (去除 |ench... 和 #hash 后缀)
+        String baseId = key.split("[|#]")[0];
+
+        // 权威原厂预设与枪械前缀永远有效
+        if (DEFAULT_FACTORY_PRESETS.containsKey(baseId) || baseId.startsWith("gun:")) {
+            return false;
+        }
+
+        // 3. 常见近战武器标识过滤 (如 star_sword 召星者, excalibur 誓约胜利之剑, sword, axe)
+        if (lowerKey.contains("star_sword")
+                || lowerKey.contains("excalibur")
+                || lowerKey.contains("_sword")
+                || lowerKey.contains("_axe")
+                || lowerKey.contains("sword#")
+                || lowerKey.contains("axe#")) {
+            return true;
+        }
+
+        // 4. 尝试从注册表解析物品类型
+        try {
+            ResourceLocation loc = ResourceLocation.tryParse(baseId);
+            if (loc != null && ForgeRegistries.ITEMS.containsKey(loc)) {
+                Item item = ForgeRegistries.ITEMS.getValue(loc);
+                if (item != null && item != Items.AIR) {
+                    if (item instanceof SwordItem 
+                            || item instanceof AxeItem 
+                            || item instanceof SpawnEggItem
+                            || item instanceof BlockItem) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        return false;
+    }
+
+    /**
      * 获取指定弓的综合弹道参数 (第 0 tick 零延迟精准获取)
      */
     public static BallisticsProfile getProfile(ItemStack bowStack) {
@@ -236,8 +331,18 @@ public final class AutoBallisticsTracker {
 
         // O(1) 瞬态引用快速检查：若手持物品实例与标签引用均未变，直接返回上一次缓存
         CompoundTag curTag = bowStack.getTag();
-        if (bowStack == lastHeldStackRef && curTag == lastHeldTagRef && lastCachedProfile != null) {
+        if (bowStack == lastHeldStackRef && curTag == lastHeldTagRef) {
             return lastCachedProfile;
+        }
+
+        // 严格防呆拦截：若手持物品为纯近战武器（如剑、斧、召星者等）或非远程道具，
+        // 绝不为其生成、伪造抛物线弹道档案，更严禁写入磁盘特征数据库！
+        if (!isRangedWeapon(bowStack)) {
+            lastHeldStackRef = bowStack;
+            lastHeldTagRef = curTag;
+            lastCachedSignature = null;
+            lastCachedProfile = null;
+            return null;
         }
 
         // 提取稳态指纹 (已自动过滤 Damage 耐久变动与无害显示变动)
@@ -259,8 +364,10 @@ public final class AutoBallisticsTracker {
 
         if (profile == null) {
             profile = computeInitialProfile(bowStack);
-            CACHE.put(signature, profile);
-            markDirty();
+            if (profile != null) {
+                CACHE.put(signature, profile);
+                markDirty();
+            }
         } else {
             if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(bowStack)) {
                 com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus gun = 
@@ -301,6 +408,10 @@ public final class AutoBallisticsTracker {
      * 计算初始特征弹道参数 (第一级静态/属性探测)
      */
     private static BallisticsProfile computeInitialProfile(ItemStack bowStack) {
+        if (bowStack == null || bowStack.isEmpty() || !isRangedWeapon(bowStack)) {
+            return null;
+        }
+
         if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(bowStack)) {
             com.xdyyj.autoattacker.weapon.FirearmAdapter.GunStatus gun = 
                 com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(bowStack);
@@ -498,7 +609,7 @@ public final class AutoBallisticsTracker {
         // 3. 检查神话或属性修饰的 minChargeTicks
         BallisticsProfile profile = getProfile(bowStack);
         int usedTicks = player.getTicksUsingItem();
-        if (profile.minChargeTicks > 0) {
+        if (profile != null && profile.minChargeTicks > 0) {
             return (float) usedTicks / (float) profile.minChargeTicks;
         }
 
@@ -536,7 +647,7 @@ public final class AutoBallisticsTracker {
         // 3. 检查神话拉弓速度 (minChargeTicks)
         BallisticsProfile profile = getProfile(bowStack);
         int usedTicks = player.getTicksUsingItem();
-        if (profile.minChargeTicks < 20) {
+        if (profile != null && profile.minChargeTicks < 20) {
             return usedTicks >= profile.minChargeTicks;
         }
 
@@ -648,7 +759,7 @@ public final class AutoBallisticsTracker {
         return false;
     }
 
-    private static BallisticsProfile getDefaultProfile() {
+    public static BallisticsProfile getDefaultProfile() {
         return new BallisticsProfile(
             AutoAttackerConfig.AIM_PREDICT_ARROW_SPEED.get().floatValue(),
             AutoAttackerConfig.AIM_PREDICT_GRAVITY.get(),
@@ -912,8 +1023,12 @@ public final class AutoBallisticsTracker {
                     }
                     // 用户本地档案覆盖/追加到内存库中
                     CACHE.putAll(loaded);
-                    // 自动净化历史迁移碎片数据
-                    CACHE.keySet().removeIf(k -> k.contains("modern_kinetic_gun#"));
+                    // 自动净化历史迁移碎片数据及误存入的近战武器/非武器档案 (如召星者、泰拉之刃、誓约胜利之剑、下界合金剑、刷怪蛋等)
+                    boolean removedInvalid = CACHE.keySet().removeIf(AutoBallisticsTracker::isInvalidBallisticSignature);
+                    if (removedInvalid) {
+                        LOGGER.info("已自动从武器档案库净化近战武器及非弹道条目。");
+                        isDirty = true;
+                    }
                     LOGGER.info("成功载入 " + loaded.size() + " 个本地武器弹道档案。当前档案库共计 " + CACHE.size() + " 种武器。");
                     loadedSuccess = true;
                 }
@@ -936,7 +1051,10 @@ public final class AutoBallisticsTracker {
                                 idx++;
                             }
                             CACHE.putAll(loaded);
-                            CACHE.keySet().removeIf(k -> k.contains("modern_kinetic_gun#"));
+                            boolean backupRemoved = CACHE.keySet().removeIf(AutoBallisticsTracker::isInvalidBallisticSignature);
+                            if (backupRemoved) {
+                                isDirty = true;
+                            }
                             LOGGER.info("成功从 .bak 备份文件载入 " + loaded.size() + " 个本地武器弹道档案。");
                         }
                     } catch (Exception ex) {
@@ -946,8 +1064,9 @@ public final class AutoBallisticsTracker {
             }
         }
 
-        // 3. 若从旧文件迁移或新文件尚不存在，立即安全回写磁盘
-        if (needMigrate || !Files.exists(path)) {
+        // 3. 若从旧文件迁移、发生数据清洗或新文件尚不存在，立即安全回写磁盘
+        if (needMigrate || isDirty || !Files.exists(path)) {
+            isDirty = true;
             saveToDiskImmediate();
         }
     }
@@ -1012,9 +1131,10 @@ public final class AutoBallisticsTracker {
 
     public static BallisticsProfile reparseTooltip(ItemStack stack) {
         ensureLoaded();
-        if (stack == null || stack.isEmpty()) return null;
+        if (stack == null || stack.isEmpty() || !isRangedWeapon(stack)) return null;
         String sig = getBallisticSignature(stack);
         BallisticsProfile p = computeInitialProfile(stack);
+        if (p == null) return null;
         p.lastUpdated = System.currentTimeMillis();
         CACHE.put(sig, p);
         lastHeldStackRef = ItemStack.EMPTY;

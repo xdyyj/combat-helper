@@ -141,7 +141,7 @@ public class TacticalDebugPanel {
 
         if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(weaponStack)) {
             hudCachedGun = com.xdyyj.autoattacker.weapon.FirearmAdapter.getGunStatus(weaponStack);
-        } else {
+        } else if (ClientEvents.isBow(weaponStack) || weaponStack.getItem() instanceof net.minecraft.world.item.TridentItem) {
             hudCachedProfile = AutoBallisticsTracker.getProfile(weaponStack);
             // tooltip 解析仅在弓弩分页需要，且其开销最大 (构建 tooltip + 正则)，故一并纳入节流
             hudCachedExtracted = TooltipBallisticsExtractor.extract(weaponStack, player);
@@ -403,6 +403,9 @@ public class TacticalDebugPanel {
             AutoBallisticsTracker.BallisticsProfile profile = (hudCachedProfile != null)
                     ? hudCachedProfile
                     : AutoBallisticsTracker.getProfile(weaponStack);
+            if (profile == null) {
+                profile = AutoBallisticsTracker.getDefaultProfile();
+            }
 
             int y1 = startY + 16;
             graphics.drawString(font, "初速", panelX + 6, y1 + 2, 0xFFB0B6C2, false);
