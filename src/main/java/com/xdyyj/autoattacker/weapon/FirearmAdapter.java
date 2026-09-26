@@ -1302,38 +1302,33 @@ public final class FirearmAdapter {
         }
 
         // 7. 通用枪械退避方案：优先根据 ammoId 匹配，再扫描同命名空间与常见弹药关键词
+        ResourceLocation ammoRes = null;
         CompoundTag tag = stack.getTag();
         if (tag != null) {
             String ammoIdStr = tag.contains("AmmoId") ? tag.getString("AmmoId") : (tag.contains("ammoId") ? tag.getString("ammoId") : null);
             if (ammoIdStr != null && !ammoIdStr.isEmpty()) {
-                ResourceLocation ammoRes = ResourceLocation.tryParse(ammoIdStr);
-                if (ammoRes != null) {
-                    for (ItemStack invStack : player.getInventory().items) {
-                        if (!invStack.isEmpty()) {
-                            ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
-                            if (ammoRes.equals(itemRes)) {
-                                return true;
-                            }
-                        }
-                    }
-                }
+                ammoRes = ResourceLocation.tryParse(ammoIdStr);
             }
         }
 
         ResourceLocation gunReg = ForgeRegistries.ITEMS.getKey(stack.getItem());
         String gunNs = gunReg != null ? gunReg.getNamespace().toLowerCase(Locale.ROOT) : "";
+
         for (ItemStack invStack : player.getInventory().items) {
-            if (!invStack.isEmpty() && invStack.getCount() > 0) {
-                ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
-                if (itemRes != null) {
-                    String itemNs = itemRes.getNamespace().toLowerCase(Locale.ROOT);
-                    String itemPath = itemRes.getPath().toLowerCase(Locale.ROOT);
-                    if ((itemNs.equals(gunNs) || itemNs.equals("minecraft") || itemNs.contains("ammo") || itemNs.contains("bullet")) &&
-                        (itemPath.contains("ammo") || itemPath.contains("bullet") || itemPath.contains("magazine") ||
-                         itemPath.contains("round") || itemPath.contains("powder") || itemPath.contains("arrow") ||
-                         itemPath.contains("cartridge") || itemPath.contains("shot") || itemPath.contains("ball"))) {
-                        return true;
-                    }
+            if (invStack.isEmpty() || invStack.getCount() <= 0) continue;
+
+            ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
+            if (itemRes != null) {
+                if (ammoRes != null && ammoRes.equals(itemRes)) {
+                    return true;
+                }
+                String itemNs = itemRes.getNamespace().toLowerCase(Locale.ROOT);
+                String itemPath = itemRes.getPath().toLowerCase(Locale.ROOT);
+                if ((itemNs.equals(gunNs) || itemNs.equals("minecraft") || itemNs.contains("ammo") || itemNs.contains("bullet")) &&
+                    (itemPath.contains("ammo") || itemPath.contains("bullet") || itemPath.contains("magazine") ||
+                     itemPath.contains("round") || itemPath.contains("powder") || itemPath.contains("arrow") ||
+                     itemPath.contains("cartridge") || itemPath.contains("shot") || itemPath.contains("ball"))) {
+                    return true;
                 }
             }
         }
