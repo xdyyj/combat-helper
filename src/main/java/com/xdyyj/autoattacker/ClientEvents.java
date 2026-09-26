@@ -1479,7 +1479,7 @@ public class ClientEvents {
      *
      * @param fallbackYaw 水平偏移过小时沿用的偏航角 (通常是当前实际视角)
      */
-    private static float safeAimYaw(double dx, double dz, float fallbackYaw) {
+    static float safeAimYaw(double dx, double dz, float fallbackYaw) {
         double horiz = Math.sqrt(dx * dx + dz * dz);
         if (horiz < 0.05D) return fallbackYaw;
         return (float) (Mth.atan2(dz, dx) * (180D / Math.PI)) - 90.0F;
