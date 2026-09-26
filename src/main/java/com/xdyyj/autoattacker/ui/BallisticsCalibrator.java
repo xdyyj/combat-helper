@@ -49,7 +49,7 @@ public final class BallisticsCalibrator {
     }
 
     private static volatile boolean isCalibrating = false;
-    private static final List<ShotSample> SAMPLES = new ArrayList<>();
+    private static final List<ShotSample> SAMPLES = new java.util.concurrent.CopyOnWriteArrayList<>();
     private static final Map<Integer, InFlightRecord> IN_FLIGHT = new ConcurrentHashMap<>();
     private static int sampleCounter = 0;
 
@@ -95,7 +95,7 @@ public final class BallisticsCalibrator {
     }
 
     public static List<ShotSample> getSamples() {
-        return Collections.unmodifiableList(new ArrayList<>(SAMPLES));
+        return Collections.unmodifiableList(SAMPLES);
     }
 
     public static int getSampleCount() {

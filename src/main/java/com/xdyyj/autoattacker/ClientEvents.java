@@ -23,6 +23,7 @@ import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.client.event.InputEvent;
 import net.minecraftforge.common.ForgeHooks;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import net.minecraftforge.event.level.LevelEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraft.tags.ItemTags;
@@ -49,8 +50,6 @@ import java.util.Set;
 
 public class ClientEvents {
 
-    private boolean didSuppressVanillaAttack = false;
-    
     // --- 物品识别缓存变量 ---
     private static ItemStack lastCheckedItem = ItemStack.EMPTY;
     private static boolean isLastItemWeapon = false;
@@ -100,17 +99,7 @@ public class ClientEvents {
     // 活跃度用于「压枪阻尼」（需要快速衰减），二者语义相反，故分开维护。
     private float mouseActivity = 0f;
     private long lastSwitchTime = 0L;
-    private float lastLockedYaw = 0f;
-    private float lastLockedPitch = 0f;
     private boolean wasLockedLastFrame = false;
-    // 上一帧本模组自身写入的朝向增量。用于在统计"玩家手动偏转"时剔除自转，
-    // 否则压枪/吸附自己每帧转动的角度会被误计为玩家甩枪，形成自阻尼闭环。
-    private float selfAppliedYaw = 0f;
-    private float selfAppliedPitch = 0f;
-    // 上一帧自瞄「尚未完成的追踪量」(度)。用于区分「相机变化来自自瞄追目标」与
-    // 「来自玩家甩枪」：前者即使本模组只写入了一部分，缺口也不该算作玩家操作。
-    private float lastAimTrackingGapYaw = 0f;
-    private float lastAimTrackingGapPitch = 0f;
 
     // --- 动态相对运动前馈补偿状态 (Dynamic Rotational Kinematic Feedforward) ---
     private LivingEntity lastTrackedTarget = null;
@@ -140,14 +129,6 @@ public class ClientEvents {
     // 走位前馈的合理上限 (度/帧)。正常走位引起的目标相对角位移远小于此值；
     // 超出者基本都源于目标自身移动或方位角几何翻转，不应前馈。
     private static final float KINEMATIC_FEEDFORWARD_MAX_DEG = 15.0f;
-
-    // 自瞄「忙碌」判据：上一帧未完成的追踪缺口超过此角度时，认为相机转动由自瞄主导，
-    // 该帧的相机位移不计入玩家偏转(死区)累计。
-    private static final float AIM_TRACKING_BUSY_DEG = 3.0f;
-
-    // 自瞄追踪期间，单帧残差的限幅值 (度)。平滑跟踪的追赶滞后残差通常远小于此，
-    // 而玩家主动甩枪的单帧位移通常远大于此，故限幅可压制滞后而不影响真实操作。
-    private static final float DEADZONE_RESIDUAL_CLAMP_DEG = 2.0f;
 
     // 部位锁定切换的瞄准高度平滑速率 (格/秒)。见 smoothAimHeight。
     private static final double AIM_HEIGHT_SMOOTH_RATE = 1.8D;
@@ -255,13 +236,6 @@ public class ClientEvents {
         mouseDeflectionYaw = 0f;
         mouseDeflectionPitch = 0f;
         mouseActivity = 0f;
-        // 自转剔除基准同样归零：切换/放弃目标后相机基准已无意义，若保留旧增量，
-        // 下一帧 wrapDegrees(cur - lastLocked) - selfApplied 会把两帧间的真实位移
-        // 全算进 mouseDeflection，可能直接越过甩脱阈值而解除锁定。
-        selfAppliedYaw = 0f;
-        selfAppliedPitch = 0f;
-        lastAimTrackingGapYaw = 0f;
-        lastAimTrackingGapPitch = 0f;
         for (int i = 0; i < VEL_SAMPLE_CAP; i++) {
             velSamples[i] = Vec3.ZERO;
         }
@@ -272,6 +246,7 @@ public class ClientEvents {
         this.isManualLocked = false;
         this.manualLockCancelled = false;
         this.targetSwitchTransit.active = false;
+        this.swapTransit.active = false;
         this.hasValidRawMouse = false;
         this.autoLockHoverTarget = null;
         this.autoLockHoverTicks = 0;
@@ -291,6 +266,7 @@ public class ClientEvents {
         staticLastPredictedCamPitch = 0.0f;
         resetTargetTracking();
         AutoBallisticsTracker.clearTransientReferences();
+        com.xdyyj.autoattacker.weapon.FirearmAdapter.clearFrameCache();
         com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
     }
 
@@ -345,7 +321,6 @@ public class ClientEvents {
         var gameMode = mc.gameMode;
 
         if (player == null || mc.level == null || gameMode == null || mc.screen != null || !AutoAttackerConfig.ENABLE_MOD.get()) {
-            this.didSuppressVanillaAttack = false;
             if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
                 com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
             }
@@ -353,7 +328,6 @@ public class ClientEvents {
         }
 
         if (ShoulderSurfingCompat.isShoulderSurfing() && ShoulderSurfingCompat.isFreeLooking()) {
-            this.didSuppressVanillaAttack = false;
             if (com.xdyyj.autoattacker.weapon.FirearmAdapter.isTriggerShooting()) {
                 com.xdyyj.autoattacker.weapon.FirearmAdapter.setTriggerShoot(false, player);
             }
@@ -633,11 +607,7 @@ public class ClientEvents {
             boolean isKeyDown = ClientModEvents.LOCK_ON_KEY.isDown();
             boolean isToggleMode = AutoAttackerConfig.AIM_ASSIST_MODE.get() == AutoAttackerConfig.LockMode.TOGGLE;
             boolean isHoldingBow = isRangedWeapon(player.getMainHandItem()) || isRangedWeapon(player.getOffhandItem());
-            boolean isHoldingWeapon = isHoldingBow || 
-                    com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getMainHandItem()) ||
-                    player.getMainHandItem().getItem() instanceof net.minecraft.world.item.SwordItem ||
-                    player.getMainHandItem().getItem() instanceof net.minecraft.world.item.AxeItem ||
-                    player.getMainHandItem().getItem() instanceof net.minecraft.world.item.TridentItem;
+            boolean isHoldingWeapon = isHoldingWeapon(player);
 
             double searchRange = (isHoldingBow && AutoAttackerConfig.ENABLE_AIM_PREDICT.get())
                     ? Math.max(AutoAttackerConfig.AIM_ASSIST_RANGE.get(), AutoAttackerConfig.AIM_PREDICT_MAX_DIST.get())
@@ -946,16 +916,8 @@ public class ClientEvents {
             lastTrackedTarget = null;
             lastDestYaw = Float.NaN;
             lastDestPitch = Float.NaN;
-            // 同 lostTargetGrace 分支：不追踪期间须清空自转剔除量，否则恢复首帧会拿陈旧基准
-            // 相减，把期间的真实相机位移误判成玩家甩枪而解除锁定。
-            selfAppliedYaw = 0f;
-            selfAppliedPitch = 0f;
-            lastAimTrackingGapYaw = 0f;
-            lastAimTrackingGapPitch = 0f;
             mouseDeflectionYaw = 0f;
             mouseDeflectionPitch = 0f;
-            lastLockedYaw = 0f;
-            lastLockedPitch = 0f;
             com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
             return;
         }
@@ -970,16 +932,9 @@ public class ClientEvents {
             targetSwitchTransit.active = false;
             lastDestYaw = Float.NaN;
             lastDestPitch = Float.NaN;
-            selfAppliedYaw = 0f;
-            selfAppliedPitch = 0f;
-            lastAimTrackingGapYaw = 0f;
-            lastAimTrackingGapPitch = 0f;
-            // 脱锁期间必须一并清空玩家偏转累计与上一帧锁定角：否则残留量会跨过这次
-            // 脱锁带到下一次锁定，新目标刚锁上就可能被上一次的残留量顶过死区而立刻甩脱。
+            // 脱锁期间清空玩家偏转累计
             mouseDeflectionYaw = 0f;
             mouseDeflectionPitch = 0f;
-            lastLockedYaw = 0f;
-            lastLockedPitch = 0f;
             com.xdyyj.autoattacker.compat.ThirdPersonCompat.resetAiming();
             return;
         }
@@ -1164,20 +1119,8 @@ public class ClientEvents {
             lastDestPitch = Float.NaN;
             lastDestCamYaw = Float.NaN;
             lastDestCamPitch = Float.NaN;
-            // 宽容期内不追踪目标，相机变化不应算作玩家甩枪。若保留上一帧的自转剔除量
-            // (selfAppliedYaw 可高达十余度)，恢复追踪的首帧会用陈旧基准相减，把这两帧的
-            // 全部真实位移误判为玩家主动甩脱 → 累计超过死区 → 无故解除锁定。
-            // SMOOTH 逐帧写入角度故必中此坑，HARD 在该模式下不经过本段所以不受影响。
-            selfAppliedYaw = 0f;
-            selfAppliedPitch = 0f;
-            lastAimTrackingGapYaw = 0f;
-            lastAimTrackingGapPitch = 0f;
-            // 同 currentTarget==null 分支：宽容期内不追踪，玩家偏转与上一帧锁定角一并清零，
-            // 避免这段"非追踪期"的残留跨到恢复之后影响死区判定。
             mouseDeflectionYaw = 0f;
             mouseDeflectionPitch = 0f;
-            lastLockedYaw = 0f;
-            lastLockedPitch = 0f;
             return;
         }
 
@@ -1203,13 +1146,6 @@ public class ClientEvents {
                 player.yHeadRotO = hardPlayerYaw;
             }
 
-            lastLockedYaw = hardCamYaw;
-            lastLockedPitch = hardCamPitch;
-            // HARD 强锁为瞬移分支，不参与阻尼计算；清零自身增量避免残留值污染后续 SMOOTH 帧
-            selfAppliedYaw = 0f;
-            selfAppliedPitch = 0f;
-            lastAimTrackingGapYaw = 0f;
-            lastAimTrackingGapPitch = 0f;
             wasLockedLastFrame = true;
             lastTrackedTarget = target;
             lastDestYaw = hardPlayerYaw;
@@ -1400,7 +1336,24 @@ public class ClientEvents {
         // 无论目标角差距有多大 (例如 80°~90°)，准星都会以极其平滑、均匀的电影级速度摇镜转过去，
         // 物理上 100% 杜绝任何 1 帧跳跃闪现！
         float safeDt = (deltaSec > 0f && deltaSec <= 0.25f) ? deltaSec : (1.0f / 60.0f);
-        float maxDegPerSec = targetSwitchTransit.active ? 360.0f : 520.0f;
+        float maxDegPerSec = 520.0f;
+        if (targetSwitchTransit.active) {
+            maxDegPerSec = Math.min(maxDegPerSec, 360.0f);
+        }
+        if (swapTransit.active) {
+            if (isGunFiring || currentTarget == null) {
+                swapTransit.active = false;
+            } else {
+                long elapsed = System.nanoTime() - swapTransit.startNanos;
+                if (elapsed >= SWAP_TRANSIT_DURATION_NANOS || elapsed < 0L) {
+                    swapTransit.active = false;
+                } else {
+                    float t = (float) elapsed / (float) SWAP_TRANSIT_DURATION_NANOS;
+                    float swapMaxRate = SWAP_TRANSIT_RATE_START + (SWAP_TRANSIT_RATE_FULL - SWAP_TRANSIT_RATE_START) * t;
+                    maxDegPerSec = Math.min(maxDegPerSec, swapMaxRate);
+                }
+            }
+        }
         float maxStepDeg = maxDegPerSec * safeDt;
 
         stepCamY = Mth.clamp(stepCamY, -maxStepDeg, maxStepDeg);
@@ -1408,12 +1361,6 @@ public class ClientEvents {
 
         float newCamYaw = curCamYaw + stepCamY;
         float newCamPitch = Mth.clamp(curCamPitch + stepCamX, -89.5F, 89.5F);
-
-        // 换武器平滑过渡：拦截目标角突变，把镜头从上一帧朝向平滑滑向目标朝向
-        // (未锁定或开火时自动让位，不干扰锁定吸附与开枪手感)
-        float[] transit = applySwapTransit(newCamYaw, newCamPitch, isGunFiring, currentTarget != null, deltaSec);
-        newCamYaw = transit[0];
-        newCamPitch = transit[1];
 
         float newPlayerYaw;
         float newPlayerPitch;
@@ -1456,17 +1403,6 @@ public class ClientEvents {
             player.yHeadRotO = newPlayerYaw;
         }
 
-        // 记录本帧最终朝向，并保存"本模组自身施加的增量"供下一帧剔除自转
-        float finalYaw = isShoulder ? newCamYaw : newPlayerYaw;
-        float finalPitch = isShoulder ? newCamPitch : newPlayerPitch;
-        selfAppliedYaw = Mth.wrapDegrees(finalYaw - curYaw);
-        selfAppliedPitch = finalPitch - curPitch;
-
-        lastLockedYaw = finalYaw;
-        lastLockedPitch = finalPitch;
-        // 记录本帧剩余未完成的追踪缺口，供下一帧判定相机转动是否由自瞄主导。
-        lastAimTrackingGapYaw = deltaCamY;
-        lastAimTrackingGapPitch = deltaCamX;
         wasLockedLastFrame = true;
     }
 
@@ -1479,14 +1415,10 @@ public class ClientEvents {
      *
      * @param fallbackYaw 水平偏移过小时沿用的偏航角 (通常是当前实际视角)
      */
-    private static float safeAimYaw(double dx, double dz, float fallbackYaw) {
+    static float safeAimYaw(double dx, double dz, float fallbackYaw) {
         double horiz = Math.sqrt(dx * dx + dz * dz);
         if (horiz < 0.05D) return fallbackYaw;
         return (float) (Mth.atan2(dz, dx) * (180D / Math.PI)) - 90.0F;
-    }
-
-    private LivingEntity getClosestTargetInFOV(Player player, double range, float maxAngle) {
-        return getPrioritizedTarget(player, range, maxAngle, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
     }
 
     // =========================================================================
@@ -1497,23 +1429,14 @@ public class ClientEvents {
     private final class SwapTransit {
         boolean active = false;
         long startNanos = 0L;
-        float curYaw = 0f;    // 当前实际输出的朝向 (逐帧累积, 始终跟随目标)
-        float curPitch = 0f;
     }
 
     /**
      * 每帧检测主手物品是否变化，变化即开启一段过渡窗口。
-     *
-     * 注意：换武器本身会让 currentTarget 短暂失效 (视线/目标重算)，
-     * 因此这里不要求 currentTarget 非空 —— 否则最需要平滑的那一刻反而被跳过。
-     * 真正是否施加限速，由 applySwapTransit 在渲染阶段结合锁定状态决定。
-     *
-     * @param isShoulder 当前是否第三人称越肩
      */
     private void updateSwapTransit(Player player) {
         ItemStack held = player.getMainHandItem();
 
-        // 仅比较物品与 NBT，忽略堆叠数量 (丢弃/拾取同类物品不应触发过渡)
         boolean changed = !ItemStack.isSameItemSameTags(held, lastSwapWatchItem);
         if (changed) {
             lastSwapWatchItem = held.copy();
@@ -1521,77 +1444,9 @@ public class ClientEvents {
 
         if (!changed) return;
 
-        manualLockCancelled = false; // 切换武器后恢复自动自瞄响应性
+        manualLockCancelled = false;
         swapTransit.active = true;
         swapTransit.startNanos = System.nanoTime();
-        // 起点取"此刻的实际朝向"，保证视觉上从当前位置开始滑动。
-        // isShoulder 在此处才查询：未换武器时无需探测人称，避免每帧一次反射查询。
-        boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
-        if (isShoulder) {
-            swapTransit.curYaw = ShoulderSurfingCompat.getCameraYaw();
-            swapTransit.curPitch = ShoulderSurfingCompat.getCameraPitch();
-        } else {
-            swapTransit.curYaw = player.getYRot();
-            swapTransit.curPitch = player.getXRot();
-        }
-    }
-
-    /**
-     * 换武器后的镜头限速收敛 (Slew-Rate Limiting)。
-     *
-     * 设计要点：绝不用「固定起点 + 曲线插值」——那会让镜头在过渡窗口内脱离目标移动，
-     * 表现为准星僵在原处不跟随。此处对「本帧目标角」做速率限制：
-     * 每帧都朝当前目标推进，只是推进速度受上限约束，因此目标移动时准星持续跟随。
-     *
-     * 仅当处于锁定状态时才施加；开火时立即让位，绝不干扰开枪吸附。
-     *
-     * @param firingNow 当前是否处于开火状态
-     * @param locked   当前是否有锁定目标
-     * @param deltaSec 本帧时长
-     * @return 经过限速后的角度 [yaw, pitch]
-     */
-    private float[] applySwapTransit(float targetYaw, float targetPitch,
-                                     boolean firingNow, boolean locked, float deltaSec) {
-        if (!swapTransit.active) {
-            return new float[]{targetYaw, targetPitch};
-        }
-
-        // 未锁定 / 开火：立即结束过渡，完全不参与插值
-        if (firingNow || !locked) {
-            swapTransit.active = false;
-            return new float[]{targetYaw, targetPitch};
-        }
-
-        long elapsed = System.nanoTime() - swapTransit.startNanos;
-        if (elapsed >= SWAP_TRANSIT_DURATION_NANOS || elapsed < 0L) {
-            swapTransit.active = false;
-            return new float[]{targetYaw, targetPitch};
-        }
-
-        // 速率上限从 RATE_START 线性放开到 RATE_FULL：
-        // 起步稍缓避免顿挫，但全程保留足够跟随速率，绝不出现准星停摆。
-        float t = (float) elapsed / (float) SWAP_TRANSIT_DURATION_NANOS;
-        float maxRate = SWAP_TRANSIT_RATE_START + (SWAP_TRANSIT_RATE_FULL - SWAP_TRANSIT_RATE_START) * t;
-
-        // 每帧都从"上一帧实际输出朝向"重新对齐，消除与真实相机的漂移
-        // (curYaw/curPitch 即上一帧本方法返回的角度)
-        float deltaYaw = Mth.wrapDegrees(targetYaw - swapTransit.curYaw);
-        float deltaPitch = targetPitch - swapTransit.curPitch;
-
-        float safeDelta = (deltaSec <= 0f || deltaSec > 0.25f) ? (1.0f / 60.0f) : deltaSec;
-        float maxStep = Math.max(0.01f, maxRate * safeDelta);
-
-        // 安全阀：已收敛到位 (偏差小于半个步长) 即提前结束过渡，
-        // 避免与上游平滑步进形成双重限速叠加、导致收敛拖沓。
-        if (Math.abs(deltaYaw) <= maxStep && Math.abs(deltaPitch) <= maxStep) {
-            swapTransit.active = false;
-            return new float[]{targetYaw, targetPitch};
-        }
-
-        swapTransit.curYaw += Mth.clamp(deltaYaw, -maxStep, maxStep);
-        swapTransit.curPitch += Mth.clamp(deltaPitch, -maxStep, maxStep);
-
-        return new float[]{swapTransit.curYaw, swapTransit.curPitch};
     }
 
     /**
@@ -1758,7 +1613,7 @@ public class ClientEvents {
     }
 
     /** 按选定优先级为候选打分 (与选择逻辑同源)。 */
-    private static double scoreCandidate(Candidate c, double range, AutoAttackerConfig.SwitchPriority priority) {
+    static double scoreCandidate(Candidate c, double range, AutoAttackerConfig.SwitchPriority priority) {
         return switch (priority) {
             case FOV -> c.alignment - 0.15D * (Math.sqrt(c.distSqr) / range);
             case DISTANCE -> -Math.sqrt(c.distSqr);
@@ -1796,24 +1651,33 @@ public class ClientEvents {
         boolean isShoulder = ShoulderSurfingCompat.isShoulderSurfing();
         Vec3 eyePos = isShoulder ? ShoulderSurfingCompat.getCameraPosition() : player.getEyePosition();
         Vec3 lookVec = isShoulder ? ShoulderSurfingCompat.getCameraLookVector() : player.getViewVector(1.0F);
-        double curScore = scoreTarget(player, current, eyePos, lookVec, range);
-        double newScore = scoreTarget(player, candidate, eyePos, lookVec, range);
-        return newScore > curScore + TARGET_SWITCH_GAIN_MARGIN;
+        AutoAttackerConfig.SwitchPriority priority = AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get();
+        double curScore = scoreTarget(player, current, eyePos, lookVec, range, priority);
+        double newScore = scoreTarget(player, candidate, eyePos, lookVec, range, priority);
+        double margin = switch (priority) {
+            case FOV -> TARGET_SWITCH_GAIN_MARGIN;
+            case DISTANCE -> 1.5D;
+            case HEALTH -> 2.0D;
+        };
+        return newScore > curScore + margin;
     }
 
     /**
-     * 目标评分 (与 findSwitchTarget 内部一致)：对齐度为主权重，距离为次权重。
-     * 供「切换是否值得」比较使用。
+     * 目标评分 (与 findSwitchTarget 及 scoreCandidate 一致)：遵循玩家配置的优先级。
      */
-    private double scoreTarget(Player player, LivingEntity entity, Vec3 eyePos, Vec3 lookVec, double range) {
+    private double scoreTarget(Player player, LivingEntity entity, Vec3 eyePos, Vec3 lookVec, double range, AutoAttackerConfig.SwitchPriority priority) {
         double dX = entity.getX() - eyePos.x;
         double dY = (entity.getY() + entity.getBbHeight() * 0.5D) - eyePos.y;
         double dZ = entity.getZ() - eyePos.z;
         double length = Math.sqrt(dX * dX + dY * dY + dZ * dZ);
         if (length <= 0.0001D) return -Double.MAX_VALUE;
         double alignment = (dX * lookVec.x + dY * lookVec.y + dZ * lookVec.z) / length;
-        double normDist = player.distanceToSqr(entity) <= 0 ? 0 : Math.sqrt(player.distanceToSqr(entity)) / range;
-        return alignment * 2.5D - 0.25D * normDist;
+        double dist = Math.sqrt(player.distanceToSqr(entity));
+        return switch (priority) {
+            case FOV -> alignment - 0.15D * (dist / range);
+            case DISTANCE -> -dist;
+            case HEALTH -> -entity.getHealth();
+        };
     }
 
     private LivingEntity findSwitchTarget(Player player, LivingEntity excludeTarget, double range, float maxAngle) {
@@ -1854,15 +1718,14 @@ public class ClientEvents {
         candidates.sort((a, b) -> Double.compare(a.angle, b.angle));
         int limit = Math.min(candidates.size(), MAX_SWITCH_CANDIDATE_SCANS);
 
+        AutoAttackerConfig.SwitchPriority priority = AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get();
         LivingEntity bestEntity = null;
         double bestScore = -Double.MAX_VALUE;
         for (int i = 0; i < limit; i++) {
             Candidate c = candidates.get(i);
             if (!hasLineOfSightMultiPoint(player, c.entity)) continue;
 
-            double normDist = Math.sqrt(c.distSqr) / range;
-            double score = c.alignment * 2.5D - 0.25D * normDist;
-
+            double score = scoreCandidate(c, range, priority);
             if (score > bestScore) {
                 bestScore = score;
                 bestEntity = c.entity;
@@ -1874,8 +1737,7 @@ public class ClientEvents {
             for (int i = limit; i < candidates.size(); i++) {
                 Candidate c = candidates.get(i);
                 if (!hasLineOfSightMultiPoint(player, c.entity)) continue;
-                double normDist = Math.sqrt(c.distSqr) / range;
-                double score = c.alignment * 2.5D - 0.25D * normDist;
+                double score = scoreCandidate(c, range, priority);
                 if (score > bestScore) {
                     bestScore = score;
                     bestEntity = c.entity;
@@ -1887,7 +1749,7 @@ public class ClientEvents {
     }
 
     /** 切换/选中目标的候选记录 (实体 + 预计算的角度/距离/对齐度)。 */
-    private static final class Candidate {
+    static final class Candidate {
         final LivingEntity entity;
         final double angle;
         final double distSqr;
@@ -1965,6 +1827,10 @@ public class ClientEvents {
         return false;
     }
 
+    public static boolean hasLineOfSight(Player player, LivingEntity target) {
+        return hasLineOfSightMultiPoint(player, target);
+    }
+
     public static final TagKey<Item> FORGE_BOWS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:tools/bows"));
 
     public static boolean isBow(ItemStack stack) {
@@ -2006,12 +1872,30 @@ public class ClientEvents {
 
     public static boolean isMelee(ItemStack stack) {
         if (stack == null || stack.isEmpty()) return false;
+        if (isInSet(stack, AutoAttackerConfig.blacklistItems, AutoAttackerConfig.blacklistTags)) {
+            return false;
+        }
+        if (isInSet(stack, AutoAttackerConfig.whitelistItems, AutoAttackerConfig.whitelistTags)) {
+            return true;
+        }
         Item item = stack.getItem();
-        return item instanceof SwordItem 
+        if (item instanceof SwordItem 
             || item instanceof AxeItem 
             || item instanceof TridentItem
             || stack.is(ItemTags.SWORDS) 
-            || stack.is(ItemTags.AXES);
+            || stack.is(ItemTags.AXES)) {
+            return true;
+        }
+        var modifiers = stack.getAttributeModifiers(EquipmentSlot.MAINHAND);
+        if (modifiers != null && modifiers.containsKey(Attributes.ATTACK_DAMAGE)) {
+            if (stack.is(ItemTags.PICKAXES) ||
+                stack.is(ItemTags.SHOVELS) ||
+                stack.is(ItemTags.HOES)) {
+                return false;
+            }
+            return true;
+        }
+        return false;
     }
 
     public static WeaponCategory getWeaponCategory(ItemStack stack) {
@@ -2220,7 +2104,7 @@ public class ClientEvents {
             // 属性查询只为取 reach：一次取得 Holder 即可，无需再查一遍属性表。
             var reachAttr = player.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get());
             double reach = (reachAttr != null) ? reachAttr.getValue() : 4.5D;
-            if (player.distanceToSqr(locked) <= reach * reach) {
+            if (player.distanceToSqr(locked) <= reach * reach && hasLineOfSightMultiPoint(player, locked)) {
                 // 近身攻击实体：不发空挥通知。Botania 系武器的剑气只在原版判定为
                 // 「空挥」(LeftClickEmpty，即准星未命中任何实体)时才生成；
                 // 打实体时补发通知会导致近身战斗也冒光束，与武器原本语义不符。
@@ -2358,41 +2242,32 @@ public class ClientEvents {
     public static boolean isHoldingWeapon(Player player) {
         if (player == null) return false;
         ItemStack stack = player.getMainHandItem();
-        if (stack.isEmpty()) return false;
-        
-        if (lastCheckedItem != null && ItemStack.isSameItemSameTags(lastCheckedItem, stack)) {
-            return isLastItemWeapon;
+        if (stack != null && !stack.isEmpty()) {
+            if (lastCheckedItem != null && ItemStack.isSameItemSameTags(lastCheckedItem, stack)) {
+                return isLastItemWeapon;
+            }
+            lastCheckedItem = stack;
+            isLastItemWeapon = checkIsWeapon(stack);
+            if (isLastItemWeapon) {
+                return true;
+            }
         }
-
-        lastCheckedItem = stack;
-        isLastItemWeapon = checkIsWeapon(stack);
-        return isLastItemWeapon;
+        ItemStack off = player.getOffhandItem();
+        if (off != null && !off.isEmpty() && isRangedWeapon(off) && !isInSet(off, AutoAttackerConfig.blacklistItems, AutoAttackerConfig.blacklistTags)) {
+            return true;
+        }
+        return false;
     }
 
-    private static boolean checkIsWeapon(ItemStack stack) {
-        Item item = stack.getItem();
-        
+    public static boolean checkIsWeapon(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return false;
         if (isInSet(stack, AutoAttackerConfig.blacklistItems, AutoAttackerConfig.blacklistTags)) {
             return false;
         }
         if (isInSet(stack, AutoAttackerConfig.whitelistItems, AutoAttackerConfig.whitelistTags)) {
             return true;
         }
-
-        if (stack.is(ItemTags.SWORDS) || stack.is(ItemTags.AXES) || item instanceof TridentItem) {
-            return true;
-        }
-        var modifiers = stack.getAttributeModifiers(EquipmentSlot.MAINHAND);
-        boolean hasAttackDamage = modifiers.containsKey(Attributes.ATTACK_DAMAGE);
-        if (hasAttackDamage) {
-            if (stack.is(ItemTags.PICKAXES) ||
-                stack.is(ItemTags.SHOVELS) ||
-                stack.is(ItemTags.HOES)) {
-                return false;
-            }
-            return true;
-        }
-        return false;
+        return isRangedWeapon(stack) || isMelee(stack);
     }
 
     private static boolean isInSet(ItemStack stack, Set<Item> items, Set<TagKey<Item>> tags) {
@@ -2401,5 +2276,14 @@ public class ClientEvents {
             if (stack.is(tag)) return true;
         }
         return false;
+    }
+
+    @SubscribeEvent
+    public void onLeftClickBlock(PlayerInteractEvent.LeftClickBlock event) {
+        if (!AutoAttackerConfig.ENABLE_MOD.get() || !AutoAttackerConfig.DISABLE_MELEE_MINING.get()) return;
+        if (event.getEntity() == null) return;
+        if (isMelee(event.getEntity().getMainHandItem())) {
+            event.setCanceled(true);
+        }
     }
 }

@@ -52,6 +52,8 @@
     "config.autoattacker.lock_through_walls.tooltip": "有方块、墙体或树木障碍物阻隔时持续保持自瞄锁定，不自动脱锁；只有当当前目标彻底死亡后，系统才会自动切换至下一个目标。",
     "config.autoattacker.enable_flick_break_lock": "允许甩脱锁定",
     "config.autoattacker.enable_flick_break_lock.tooltip": "允许通过物理快速甩动鼠标解除当前锁定。开启时：玩家物理快速甩动鼠标可强行脱锁；关闭时：移动走位或晃动鼠标绝不脱锁，只能通过按键手动取消锁定。",
+    "config.autoattacker.disable_melee_mining": "近战武器不挖掘方块",
+    "config.autoattacker.disable_melee_mining.tooltip": "手持近战武器（如剑、斧等）时禁止破坏方块。开启后，长按或点击左键不会挖掘身前草、花、树木及障碍方块，防止误触破坏方块、掉帧或浪费武器耐久；切换为空手或工具（镐、锹等）即可正常挖掘。",
     "key.categories.autoattacker": "Combat Helper (战斗助手)",
     "key.autoattacker.lock_on": "锁定/吸附目标",
     "key.autoattacker.debug_panel": "战术监控面板 / 调试小窗"

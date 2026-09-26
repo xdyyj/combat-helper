@@ -4,8 +4,11 @@ import com.xdyyj.autoattacker.AutoAttackerConfig;
 import com.xdyyj.autoattacker.ClientEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.phys.HitResult;
+import net.minecraftforge.common.ForgeHooks;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -18,6 +21,7 @@ public abstract class MinecraftMixin {
 
     @Shadow public LocalPlayer player;
     @Shadow public net.minecraft.client.Options options;
+    @Shadow public HitResult hitResult;
 
     @Inject(method = "handleKeybinds", at = @At("HEAD"))
     private void autoattacker$onHandleKeybinds(CallbackInfo ci) {
@@ -26,9 +30,9 @@ public abstract class MinecraftMixin {
         Minecraft mc = (Minecraft) (Object) this;
         if (this.player == null) return;
 
-        if (AutoAttackerConfig.ENABLE_AUTO_ATTACK.get() && ClientEvents.isHoldingWeapon(this.player)) {
+        if (AutoAttackerConfig.ENABLE_AUTO_ATTACK.get() && ClientEvents.isMelee(this.player.getMainHandItem())) {
             // Check if player is attempting to mine a block (looking at a block with no entity target in melee reach)
-            boolean isLookingAtBlock = mc.hitResult != null && mc.hitResult.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK;
+            boolean isLookingAtBlock = mc.hitResult != null && mc.hitResult.getType() == HitResult.Type.BLOCK;
             LivingEntity locked = ClientEvents.getCurrentTarget();
             boolean hasLockedTargetInReach = false;
             if (locked != null && locked.isAlive() && !locked.isRemoved()) {
@@ -36,14 +40,16 @@ public abstract class MinecraftMixin {
                 if (this.player.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get()) != null) {
                     reach = this.player.getAttributeValue(net.minecraftforge.common.ForgeMod.ENTITY_REACH.get());
                 }
-                if (this.player.distanceToSqr(locked) <= reach * reach) {
+                if (this.player.distanceToSqr(locked) <= reach * reach && ClientEvents.hasLineOfSight(this.player, locked)) {
                     hasLockedTargetInReach = true;
                 }
             }
 
-            // If pointing at a block and no entity target is in melee reach, preserve vanilla block breaking
+            // If pointing at a block and no entity target is in melee reach, preserve vanilla block breaking unless disableMeleeMining is enabled
             if (isLookingAtBlock && !hasLockedTargetInReach) {
-                return;
+                if (!AutoAttackerConfig.DISABLE_MELEE_MINING.get()) {
+                    return;
+                }
             }
 
             // 仅消费点击队列（防止原版重复攻击/挥砍）。
@@ -62,6 +68,31 @@ public abstract class MinecraftMixin {
                 if (this.player.getAttackStrengthScale(0.0F) >= 1.0F) {
                     ClientEvents.performAttack(mc, this.player);
                 }
+            }
+        }
+    }
+
+    @Inject(method = "startAttack", at = @At("HEAD"), cancellable = true)
+    private void autoattacker$onStartAttack(CallbackInfoReturnable<Boolean> cir) {
+        if (!AutoAttackerConfig.ENABLE_MOD.get() || !AutoAttackerConfig.DISABLE_MELEE_MINING.get()) return;
+        if (this.player == null) return;
+        if (ClientEvents.isMelee(this.player.getMainHandItem())) {
+            if (this.hitResult != null && this.hitResult.getType() == HitResult.Type.BLOCK) {
+                this.player.resetAttackStrengthTicker();
+                ForgeHooks.onEmptyLeftClick(this.player);
+                this.player.swing(InteractionHand.MAIN_HAND);
+                cir.setReturnValue(false);
+            }
+        }
+    }
+
+    @Inject(method = "continueAttack", at = @At("HEAD"), cancellable = true)
+    private void autoattacker$onContinueAttack(boolean leftClick, CallbackInfo ci) {
+        if (!AutoAttackerConfig.ENABLE_MOD.get() || !AutoAttackerConfig.DISABLE_MELEE_MINING.get()) return;
+        if (this.player == null) return;
+        if (ClientEvents.isMelee(this.player.getMainHandItem())) {
+            if (this.hitResult != null && this.hitResult.getType() == HitResult.Type.BLOCK) {
+                ci.cancel();
             }
         }
     }

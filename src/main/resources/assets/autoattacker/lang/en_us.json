@@ -50,6 +50,8 @@
     "config.autoattacker.lock_through_walls.tooltip": "Maintain aim assist lock on target even when obstructed by walls, blocks, or trees. Only automatically switches to the next target after current target dies.",
     "config.autoattacker.enable_flick_break_lock": "Allow Flick Break-Lock",
     "config.autoattacker.enable_flick_break_lock.tooltip": "Allow breaking lock by quickly flicking mouse away from target. When enabled: player can deliberately flick mouse to force unlock; when disabled: movement or camera swinging will never drop lock, only manual key press or target death can unlock.",
+    "config.autoattacker.disable_melee_mining": "Disable Melee Mining",
+    "config.autoattacker.disable_melee_mining.tooltip": "Disable block mining/breaking when holding a melee weapon (sword, axe, etc.). When enabled, left-clicking or holding attack will not mine blocks, preventing accidental block destruction, lag, or wasting weapon durability; switch to empty hand or tools (pickaxe, shovel) to mine normally.",
     "key.categories.autoattacker": "Combat Helper",
     "key.autoattacker.lock_on": "Lock-On / Aim Assist",
     "key.autoattacker.debug_panel": "Tactical Monitor Panel"

@@ -179,6 +179,17 @@ public class TacticalConsoleScreen extends Screen {
                             "按住攻击键（左键）时，系统自动在武器蓄力冷却（Attack Indicator）达到 100% 满额时出刀。",
                             "确保每一击发挥最大基础伤害与横扫暴击，彻底杜绝过快乱击导致的伤害严重折减。")));
 
+            currentItems.add(new ToggleItem("近战不挖掘方块",
+                    AutoAttackerConfig.DISABLE_MELEE_MINING::get,
+                    val -> {
+                        AutoAttackerConfig.DISABLE_MELEE_MINING.set(val);
+                        showToast("近战防破块: " + (val ? "开启" : "关闭"));
+                    },
+                    makeTooltip("近战武器不挖掘方块",
+                            "手持近战武器（如剑、斧等）时禁止破坏方块。",
+                            "开启后，手持近战武器攻击或长按左键时不会破坏身前的草、花、树木及障碍方块，防止误触破坏方块、掉帧或浪费武器耐久；",
+                            "切换为空手或工具（镐、锹等）即可正常挖掘。")));
+
             if (category == ClientEvents.WeaponCategory.BOW || category == ClientEvents.WeaponCategory.OTHER) {
                 currentItems.add(new ToggleItem("满蓄力自动放箭",
                         AutoAttackerConfig.ENABLE_AUTO_SHOOT::get,
@@ -797,11 +808,11 @@ public class TacticalConsoleScreen extends Screen {
                     Item item = held.getItem();
                     ResourceLocation loc = ForgeRegistries.ITEMS.getKey(item);
                     String itemStr = loc != null ? loc.toString() : "";
-                    List<String> curList = new ArrayList<>(getListConfig(activeListCategory).get());
-                    boolean contains = curList.contains(itemStr);
+                    boolean contains = getListConfig(activeListCategory).get().contains(itemStr);
 
                     currentItems.add(new QuickItemActionCard(held, contains,
                             LIST_CATEGORY_NAMES[activeListCategory], () -> {
+                        List<String> curList = new ArrayList<>(getListConfig(activeListCategory).get());
                         if (contains) {
                             curList.remove(itemStr);
                             showToast("已移出: " + held.getHoverName().getString());
@@ -1292,22 +1303,32 @@ public class TacticalConsoleScreen extends Screen {
         if (currentTab == 0) {
             AutoAttackerConfig.ENABLE_MOD.set(true);
             AutoAttackerConfig.ENABLE_AUTO_ATTACK.set(true);
+            AutoAttackerConfig.DISABLE_MELEE_MINING.set(false);
             AutoAttackerConfig.ENABLE_AUTO_SHOOT.set(true);
             AutoAttackerConfig.ENABLE_AIM_ASSIST.set(false);
+            AutoAttackerConfig.AIM_LOCK_TYPE.set(AutoAttackerConfig.AimLockType.SMOOTH);
+            AutoAttackerConfig.ENABLE_AUTO_SWITCH_TARGET.set(true);
+            AutoAttackerConfig.LOCK_THROUGH_WALLS.set(false);
+            AutoAttackerConfig.ENABLE_FLICK_BREAK_LOCK.set(true);
+            AutoAttackerConfig.AUTO_SWITCH_PRIORITY.set(AutoAttackerConfig.SwitchPriority.FOV);
+            AutoAttackerConfig.AUTO_LOCK_MODE.set(AutoAttackerConfig.AutoLockMode.OFF);
+            AutoAttackerConfig.AUTO_LOCK_HOVER_TIME.set(0.3);
+            AutoAttackerConfig.AUTO_LOCK_FOV.set(75.0);
             AutoAttackerConfig.AIM_ASSIST_MODE.set(AutoAttackerConfig.LockMode.HOLD);
+            AutoAttackerConfig.TARGET_PART.set(AutoAttackerConfig.TargetPart.HEAD);
             AutoAttackerConfig.AIM_ASSIST_RANGE.set(64.0);
             AutoAttackerConfig.AIM_ASSIST_SPEED.set(0.15);
             AutoAttackerConfig.LOCK_DEADZONE_THRESHOLD.set(8.0);
-            AutoAttackerConfig.TARGET_PART.set(AutoAttackerConfig.TargetPart.HEAD);
+            AutoAttackerConfig.ENABLE_GUN_TRIGGERBOT.set(true);
+            AutoAttackerConfig.ENABLE_ANTI_RECOIL.set(false);
+            AutoAttackerConfig.ANTI_RECOIL_STRENGTH.set(1.0);
+            AutoAttackerConfig.ENABLE_ADS_SENSING.set(true);
+            AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD.set(false);
             AutoAttackerConfig.ENABLE_AIM_PREDICT.set(true);
             AutoAttackerConfig.AIM_PREDICT_BLEND.set(1.0);
             AutoAttackerConfig.AIM_PREDICT_SMOOTH.set(0.5);
             AutoAttackerConfig.AIM_PREDICT_MAX_DIST.set(60.0);
-            AutoAttackerConfig.LOCK_THROUGH_WALLS.set(false);
-            AutoAttackerConfig.ENABLE_FLICK_BREAK_LOCK.set(true);
             AutoAttackerConfig.ENABLE_LEAD_INDICATOR.set(true);
-            AutoAttackerConfig.ENABLE_GUN_AUTO_RELOAD.set(false);
-            AutoAttackerConfig.ENABLE_ANTI_RECOIL.set(false);
             showToast("锁定与核心设置已恢复默认");
         } else if (currentTab == 1) {
             AutoAttackerConfig.ENABLE_TRAJECTORY_PREVIEW.set(true);

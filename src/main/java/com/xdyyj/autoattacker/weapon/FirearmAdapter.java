@@ -40,6 +40,17 @@ public final class FirearmAdapter {
 
     private static final Logger LOGGER = LogUtils.getLogger();
 
+    private static final String[] AMMO_PATH_KEYWORDS = new String[] {
+        "ammo", "bullet", "magazine", "round", "powder", "arrow", "cartridge", "shot", "ball"
+    };
+
+    private static boolean containsAnyAmmoKeyword(String path) {
+        for (String kw : AMMO_PATH_KEYWORDS) {
+            if (path.contains(kw)) return true;
+        }
+        return false;
+    }
+
     public static final TagKey<Item> FORGE_GUNS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:guns"));
     public static final TagKey<Item> C_GUNS_TAG = ItemTags.create(ResourceLocation.tryParse("c:guns"));
     public static final TagKey<Item> FORGE_AMMO_TAG = ItemTags.create(ResourceLocation.tryParse("forge:ammo"));
@@ -56,6 +67,15 @@ public final class FirearmAdapter {
     private static ItemStack cachedGunStatusStack = null;
     private static long cachedGunStatusFrame = -1L;
     private static GunStatus cachedGunStatus = null;
+
+    /**
+     * 清理帧内缓存引用 (世界卸载或退出游戏时调用，防止强引用驻留造成内存泄漏)
+     */
+    public static void clearFrameCache() {
+        cachedGunStatusStack = null;
+        cachedGunStatusFrame = -1L;
+        cachedGunStatus = null;
+    }
 
     // ==========================================
     // 1. TACZ 反射句柄缓存
@@ -1303,37 +1323,27 @@ public final class FirearmAdapter {
 
         // 7. 通用枪械退避方案：优先根据 ammoId 匹配，再扫描同命名空间与常见弹药关键词
         CompoundTag tag = stack.getTag();
+        String ammoIdStr = null;
         if (tag != null) {
-            String ammoIdStr = tag.contains("AmmoId") ? tag.getString("AmmoId") : (tag.contains("ammoId") ? tag.getString("ammoId") : null);
-            if (ammoIdStr != null && !ammoIdStr.isEmpty()) {
-                ResourceLocation ammoRes = ResourceLocation.tryParse(ammoIdStr);
-                if (ammoRes != null) {
-                    for (ItemStack invStack : player.getInventory().items) {
-                        if (!invStack.isEmpty()) {
-                            ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
-                            if (ammoRes.equals(itemRes)) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
+            ammoIdStr = tag.contains("AmmoId") ? tag.getString("AmmoId") : (tag.contains("ammoId") ? tag.getString("ammoId") : null);
         }
+        ResourceLocation ammoRes = (ammoIdStr != null && !ammoIdStr.isEmpty()) ? ResourceLocation.tryParse(ammoIdStr) : null;
 
         ResourceLocation gunReg = ForgeRegistries.ITEMS.getKey(stack.getItem());
-        String gunNs = gunReg != null ? gunReg.getNamespace().toLowerCase(Locale.ROOT) : "";
+        String gunNs = gunReg != null ? gunReg.getNamespace() : "";
+
         for (ItemStack invStack : player.getInventory().items) {
-            if (!invStack.isEmpty() && invStack.getCount() > 0) {
-                ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
-                if (itemRes != null) {
-                    String itemNs = itemRes.getNamespace().toLowerCase(Locale.ROOT);
-                    String itemPath = itemRes.getPath().toLowerCase(Locale.ROOT);
-                    if ((itemNs.equals(gunNs) || itemNs.equals("minecraft") || itemNs.contains("ammo") || itemNs.contains("bullet")) &&
-                        (itemPath.contains("ammo") || itemPath.contains("bullet") || itemPath.contains("magazine") ||
-                         itemPath.contains("round") || itemPath.contains("powder") || itemPath.contains("arrow") ||
-                         itemPath.contains("cartridge") || itemPath.contains("shot") || itemPath.contains("ball"))) {
-                        return true;
-                    }
+            if (invStack.isEmpty() || invStack.getCount() <= 0) continue;
+
+            ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
+            if (itemRes != null) {
+                if (ammoRes != null && ammoRes.equals(itemRes)) {
+                    return true;
+                }
+                String itemNs = itemRes.getNamespace();
+                if ((itemNs.equals(gunNs) || itemNs.equals("minecraft") || itemNs.contains("ammo") || itemNs.contains("bullet")) &&
+                    containsAnyAmmoKeyword(itemRes.getPath())) {
+                    return true;
                 }
             }
         }

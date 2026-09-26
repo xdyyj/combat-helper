@@ -263,4 +263,50 @@ class ClientEventsIsHoldingWeaponTest {
         // Second call re-evaluates weapon check with blacklist in place, returning false
         assertFalse(ClientEvents.isHoldingWeapon(player));
     }
+
+    @Test
+    @DisplayName("isHoldingWeapon returns true when main hand holds BowItem")
+    void testIsHoldingWeapon_BowItem() {
+        Player player = mock(Player.class);
+        ItemStack bowStack = mock(ItemStack.class);
+        net.minecraft.world.item.BowItem bowItem = mock(net.minecraft.world.item.BowItem.class);
+
+        when(player.getMainHandItem()).thenReturn(bowStack);
+        when(bowStack.isEmpty()).thenReturn(false);
+        when(bowStack.getItem()).thenReturn(bowItem);
+
+        assertTrue(ClientEvents.isHoldingWeapon(player));
+    }
+
+    @Test
+    @DisplayName("isHoldingWeapon returns true when offhand holds BowItem and main hand is empty")
+    void testIsHoldingWeapon_OffhandBowItem() {
+        Player player = mock(Player.class);
+        ItemStack bowStack = mock(ItemStack.class);
+        net.minecraft.world.item.BowItem bowItem = mock(net.minecraft.world.item.BowItem.class);
+
+        when(player.getMainHandItem()).thenReturn(ItemStack.EMPTY);
+        when(player.getOffhandItem()).thenReturn(bowStack);
+        when(bowStack.isEmpty()).thenReturn(false);
+        when(bowStack.getItem()).thenReturn(bowItem);
+
+        assertTrue(ClientEvents.isHoldingWeapon(player));
+    }
+
+    @Test
+    @DisplayName("checkIsWeapon returns true for both melee and ranged weapons")
+    void testCheckIsWeapon_UnifiedTaxonomy() {
+        ItemStack swordStack = mock(ItemStack.class);
+        SwordItem swordItem = mock(SwordItem.class);
+        when(swordStack.isEmpty()).thenReturn(false);
+        when(swordStack.getItem()).thenReturn(swordItem);
+
+        ItemStack bowStack = mock(ItemStack.class);
+        net.minecraft.world.item.BowItem bowItem = mock(net.minecraft.world.item.BowItem.class);
+        when(bowStack.isEmpty()).thenReturn(false);
+        when(bowStack.getItem()).thenReturn(bowItem);
+
+        assertTrue(ClientEvents.checkIsWeapon(swordStack));
+        assertTrue(ClientEvents.checkIsWeapon(bowStack));
+    }
 }

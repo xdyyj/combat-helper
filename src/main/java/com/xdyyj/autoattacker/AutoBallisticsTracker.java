@@ -6,7 +6,6 @@ import com.google.gson.reflect.TypeToken;
 import com.mojang.logging.LogUtils;
 import org.slf4j.Logger;
 import net.minecraft.client.Minecraft;
-import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.minecraft.nbt.ListTag;
@@ -87,7 +86,6 @@ public final class AutoBallisticsTracker {
 
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Map<String, BallisticsProfile> CACHE = new ConcurrentHashMap<>();
-    private static final Map<Integer, TrackedProjectile> ACTIVE_PROJECTILES = new ConcurrentHashMap<>();
     private static final int MAX_CACHE_SIZE = 128;
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final ScheduledExecutorService ASYNC_IO = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -194,21 +192,6 @@ public final class AutoBallisticsTracker {
             }
         }
         return list;
-    }
-
-    private static final class TrackedProjectile {
-        final int entityId;
-        final String cacheKey;
-        final List<Vec3> velHistory = new ArrayList<>(4);
-        int age = 0;
-        boolean sampled = false;
-        boolean isHoming = false;
-        int turnCount = 0;
-
-        TrackedProjectile(int entityId, String cacheKey) {
-            this.entityId = entityId;
-            this.cacheKey = cacheKey;
-        }
     }
 
     /**
@@ -864,34 +847,6 @@ public final class AutoBallisticsTracker {
         if (entity instanceof AbstractArrow || entity instanceof Projectile) return true;
         String name = entity.getClass().getSimpleName().toLowerCase(Locale.ROOT);
         return name.contains("arrow") || name.contains("projectile") || name.contains("bullet") || name.contains("shot");
-    }
-
-    private static Double tryGetGravityReflection(Entity entity) {
-        Class<?> clazz = entity.getClass();
-        for (String methodName : new String[]{"getGravity", "getDefaultGravity", "getGravityVelocity"}) {
-            try {
-                Method m = clazz.getMethod(methodName);
-                m.setAccessible(true);
-                Object res = m.invoke(entity);
-                if (res instanceof Number num) {
-                    return num.doubleValue();
-                }
-            } catch (Exception ignored) {}
-        }
-        return null;
-    }
-
-    private static ItemStack getHeldBow(Player player) {
-        if (player.isUsingItem() && (ClientEvents.isBow(player.getUseItem()) || com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getUseItem()))) {
-            return player.getUseItem();
-        }
-        if (ClientEvents.isBow(player.getMainHandItem()) || com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getMainHandItem())) {
-            return player.getMainHandItem();
-        }
-        if (ClientEvents.isBow(player.getOffhandItem()) || com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getOffhandItem())) {
-            return player.getOffhandItem();
-        }
-        return ItemStack.EMPTY;
     }
 
     // =========================================================================

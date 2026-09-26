@@ -26,6 +26,7 @@ public class AutoAttackerConfig {
     // --- 1. Master Switches ---
     public static final ForgeConfigSpec.BooleanValue ENABLE_MOD;
     public static final ForgeConfigSpec.BooleanValue ENABLE_AUTO_ATTACK;
+    public static final ForgeConfigSpec.BooleanValue DISABLE_MELEE_MINING;
     public static final ForgeConfigSpec.BooleanValue ENABLE_AUTO_SHOOT;
     public static final ForgeConfigSpec.BooleanValue ENABLE_AIM_ASSIST;
     
@@ -202,6 +203,11 @@ public class AutoAttackerConfig {
                 .comment("Enable/Disable automatic melee attacks.")
                 .translation("config.autoattacker.enable_auto_attack")
                 .define("enableAutoAttack", true);
+
+        DISABLE_MELEE_MINING = BUILDER
+                .comment("Disable block mining/breaking when holding a melee weapon.")
+                .translation("config.autoattacker.disable_melee_mining")
+                .define("disableMeleeMining", false);
 
         ENABLE_AUTO_SHOOT = BUILDER
                 .comment("Enable/Disable automatic bow shooting.")
