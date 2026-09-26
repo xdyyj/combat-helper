@@ -797,11 +797,11 @@ public class TacticalConsoleScreen extends Screen {
                     Item item = held.getItem();
                     ResourceLocation loc = ForgeRegistries.ITEMS.getKey(item);
                     String itemStr = loc != null ? loc.toString() : "";
-                    List<String> curList = new ArrayList<>(getListConfig(activeListCategory).get());
-                    boolean contains = curList.contains(itemStr);
+                    boolean contains = getListConfig(activeListCategory).get().contains(itemStr);
 
                     currentItems.add(new QuickItemActionCard(held, contains,
                             LIST_CATEGORY_NAMES[activeListCategory], () -> {
+                        List<String> curList = new ArrayList<>(getListConfig(activeListCategory).get());
                         if (contains) {
                             curList.remove(itemStr);
                             showToast("已移出: " + held.getHoverName().getString());
