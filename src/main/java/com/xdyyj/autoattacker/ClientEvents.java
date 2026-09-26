@@ -1485,10 +1485,6 @@ public class ClientEvents {
         return (float) (Mth.atan2(dz, dx) * (180D / Math.PI)) - 90.0F;
     }
 
-    private LivingEntity getClosestTargetInFOV(Player player, double range, float maxAngle) {
-        return getPrioritizedTarget(player, range, maxAngle, AutoAttackerConfig.AUTO_SWITCH_PRIORITY.get(), null);
-    }
-
     // =========================================================================
     // 换武器平滑过渡 (Weapon-Swap Smooth Transit)
     // =========================================================================
