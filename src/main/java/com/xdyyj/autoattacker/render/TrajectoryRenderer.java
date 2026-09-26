@@ -950,47 +950,6 @@ public final class TrajectoryRenderer {
         return new ProjectedPoint(x, y, onScreen, depth);
     }
 
-    // =========================================================================
-    // 3D 战术锁定折角框 (Billboard 渲染在目标实体胸口)
-    // =========================================================================
-
-    private static void renderTargetReticle(PoseStack poseStack, Camera camera,
-                                            LivingEntity target, boolean isBlocked, float partialTick) {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.level == null) return;
-
-        double tx = Mth.lerp((double) partialTick, target.xo, target.getX());
-        double ty = Mth.lerp((double) partialTick, target.yo, target.getY()) + target.getBbHeight() * 0.65D;
-        double tz = Mth.lerp((double) partialTick, target.zo, target.getZ());
-
-        Vec3 targetPos = new Vec3(tx, ty, tz);
-        Vec3 relative = targetPos.subtract(camera.getPosition());
-        double distance = relative.length();
-        if (distance > MAX_PREVIEW_DISTANCE) return;
-
-        float r = 1.00F;
-        float g = isBlocked ? 0.22F : 0.78F;
-        float b = isBlocked ? 0.18F : 0.12F;
-        float a = 0.95F;
-
-        poseStack.pushPose();
-        poseStack.translate(relative.x, relative.y, relative.z);
-        poseStack.mulPose(camera.rotation());
-
-        float scale = Mth.clamp((float) (distance * 0.05D), 0.15F, 1.5F);
-        poseStack.scale(scale, scale, scale);
-
-        Matrix4f matrix = poseStack.last().pose();
-        MultiBufferSource.BufferSource bufferSource = mc.renderBuffers().bufferSource();
-        VertexConsumer consumer = bufferSource.getBuffer(RenderType.lines());
-
-        double time = (mc.level.getGameTime() + partialTick) * 0.05D;
-        drawReticle(consumer, matrix, (float) time, r, g, b, a);
-
-        bufferSource.endBatch(RenderType.lines());
-        poseStack.popPose();
-    }
-
     private static void renderLeadReticle(PoseStack poseStack, Camera camera,
                                           Vec3 interceptPos, boolean isBlocked, float partialTick) {
         Minecraft mc = Minecraft.getInstance();
@@ -1021,56 +980,6 @@ public final class TrajectoryRenderer {
 
         bufferSource.endBatch(RenderType.lines());
         poseStack.popPose();
-    }
-
-    private static void drawReticle(VertexConsumer consumer, Matrix4f matrix, float theta,
-                                    float red, float green, float blue, float alpha) {
-        float distance = 0.25F;
-        float arm = 0.08F;
-        float cosine = Mth.cos(theta);
-        float sine = Mth.sin(theta);
-        float[][] corners = {
-                {distance, distance},
-                {-distance, distance},
-                {-distance, -distance},
-                {distance, -distance}
-        };
-
-        for (float[] corner : corners) {
-            float cornerX = corner[0];
-            float cornerY = corner[1];
-            float rotatedX = cornerX * cosine - cornerY * sine;
-            float rotatedY = cornerX * sine + cornerY * cosine;
-            float horizontalDirection = cornerX > 0.0F ? -arm : arm;
-            float verticalDirection = cornerY > 0.0F ? -arm : arm;
-
-            // 黑色阴影背衬线
-            drawReticleLine(consumer, matrix, rotatedX, rotatedY,
-                    rotatedX + horizontalDirection * cosine,
-                    rotatedY + horizontalDirection * sine,
-                    0.05F, 0.05F, 0.05F, 0.65F * alpha);
-            drawReticleLine(consumer, matrix, rotatedX, rotatedY,
-                    rotatedX - verticalDirection * sine,
-                    rotatedY + verticalDirection * cosine,
-                    0.05F, 0.05F, 0.05F, 0.65F * alpha);
-
-            // 战术亮线
-            drawReticleLine(consumer, matrix, rotatedX, rotatedY,
-                    rotatedX + horizontalDirection * cosine,
-                    rotatedY + horizontalDirection * sine,
-                    red, green, blue, alpha);
-            drawReticleLine(consumer, matrix, rotatedX, rotatedY,
-                    rotatedX - verticalDirection * sine,
-                    rotatedY + verticalDirection * cosine,
-                    red, green, blue, alpha);
-        }
-
-        // 中心战术菱形点
-        float diamond = 0.04F;
-        drawReticleLine(consumer, matrix, 0.0F, diamond, diamond, 0.0F, red, green, blue, alpha);
-        drawReticleLine(consumer, matrix, diamond, 0.0F, 0.0F, -diamond, red, green, blue, alpha);
-        drawReticleLine(consumer, matrix, 0.0F, -diamond, -diamond, 0.0F, red, green, blue, alpha);
-        drawReticleLine(consumer, matrix, -diamond, 0.0F, 0.0F, diamond, red, green, blue, alpha);
     }
 
     private static void drawLeadReticle(VertexConsumer consumer, Matrix4f matrix, float theta,
