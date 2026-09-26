@@ -1758,7 +1758,7 @@ public class ClientEvents {
     }
 
     /** 按选定优先级为候选打分 (与选择逻辑同源)。 */
-    private static double scoreCandidate(Candidate c, double range, AutoAttackerConfig.SwitchPriority priority) {
+    static double scoreCandidate(Candidate c, double range, AutoAttackerConfig.SwitchPriority priority) {
         return switch (priority) {
             case FOV -> c.alignment - 0.15D * (Math.sqrt(c.distSqr) / range);
             case DISTANCE -> -Math.sqrt(c.distSqr);
@@ -1887,7 +1887,7 @@ public class ClientEvents {
     }
 
     /** 切换/选中目标的候选记录 (实体 + 预计算的角度/距离/对齐度)。 */
-    private static final class Candidate {
+    static final class Candidate {
         final LivingEntity entity;
         final double angle;
         final double distSqr;
