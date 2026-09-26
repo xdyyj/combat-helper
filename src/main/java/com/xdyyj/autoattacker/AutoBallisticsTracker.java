@@ -866,21 +866,6 @@ public final class AutoBallisticsTracker {
         return name.contains("arrow") || name.contains("projectile") || name.contains("bullet") || name.contains("shot");
     }
 
-    private static Double tryGetGravityReflection(Entity entity) {
-        Class<?> clazz = entity.getClass();
-        for (String methodName : new String[]{"getGravity", "getDefaultGravity", "getGravityVelocity"}) {
-            try {
-                Method m = clazz.getMethod(methodName);
-                m.setAccessible(true);
-                Object res = m.invoke(entity);
-                if (res instanceof Number num) {
-                    return num.doubleValue();
-                }
-            } catch (Exception ignored) {}
-        }
-        return null;
-    }
-
     private static ItemStack getHeldBow(Player player) {
         if (player.isUsingItem() && (ClientEvents.isBow(player.getUseItem()) || com.xdyyj.autoattacker.weapon.FirearmAdapter.isGun(player.getUseItem()))) {
             return player.getUseItem();
