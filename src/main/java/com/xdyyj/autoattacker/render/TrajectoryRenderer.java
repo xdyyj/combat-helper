@@ -1143,27 +1143,6 @@ public final class TrajectoryRenderer {
         return null;
     }
 
-    private static double calculateCurrentSpeed(Player player, ItemStack stack, ProjectileProfile profile) {
-        if (profile.isBow) {
-            if (!player.isUsingItem() || player.getUseItem() != stack) {
-                return 0.0D;
-            }
-            int useDuration = player.getTicksUsingItem();
-            float power = BowItem.getPowerForTime(useDuration);
-            return power * profile.speed;
-        }
-
-        if (stack.getItem() instanceof CrossbowItem) {
-            return CrossbowItem.isCharged(stack) ? profile.speed : 0.0D;
-        }
-
-        if (player.isUsingItem() && player.getUseItem() == stack) {
-            return profile.speed;
-        }
-
-        return profile.speed;
-    }
-
     private static Vec3 applyPitchOffset(Vec3 direction, double pitchOffsetDegrees) {
         if (direction.lengthSqr() < 1.0E-8D) return Vec3.ZERO;
         Vec3 normalized = direction.normalize();
