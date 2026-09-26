@@ -40,6 +40,17 @@ public final class FirearmAdapter {
 
     private static final Logger LOGGER = LogUtils.getLogger();
 
+    private static final String[] AMMO_PATH_KEYWORDS = new String[] {
+        "ammo", "bullet", "magazine", "round", "powder", "arrow", "cartridge", "shot", "ball"
+    };
+
+    private static boolean containsAnyAmmoKeyword(String path) {
+        for (String kw : AMMO_PATH_KEYWORDS) {
+            if (path.contains(kw)) return true;
+        }
+        return false;
+    }
+
     public static final TagKey<Item> FORGE_GUNS_TAG = ItemTags.create(ResourceLocation.tryParse("forge:guns"));
     public static final TagKey<Item> C_GUNS_TAG = ItemTags.create(ResourceLocation.tryParse("c:guns"));
     public static final TagKey<Item> FORGE_AMMO_TAG = ItemTags.create(ResourceLocation.tryParse("forge:ammo"));
@@ -1321,17 +1332,14 @@ public final class FirearmAdapter {
         }
 
         ResourceLocation gunReg = ForgeRegistries.ITEMS.getKey(stack.getItem());
-        String gunNs = gunReg != null ? gunReg.getNamespace().toLowerCase(Locale.ROOT) : "";
+        String gunNs = gunReg != null ? gunReg.getNamespace() : "";
         for (ItemStack invStack : player.getInventory().items) {
             if (!invStack.isEmpty() && invStack.getCount() > 0) {
                 ResourceLocation itemRes = ForgeRegistries.ITEMS.getKey(invStack.getItem());
                 if (itemRes != null) {
-                    String itemNs = itemRes.getNamespace().toLowerCase(Locale.ROOT);
-                    String itemPath = itemRes.getPath().toLowerCase(Locale.ROOT);
+                    String itemNs = itemRes.getNamespace();
                     if ((itemNs.equals(gunNs) || itemNs.equals("minecraft") || itemNs.contains("ammo") || itemNs.contains("bullet")) &&
-                        (itemPath.contains("ammo") || itemPath.contains("bullet") || itemPath.contains("magazine") ||
-                         itemPath.contains("round") || itemPath.contains("powder") || itemPath.contains("arrow") ||
-                         itemPath.contains("cartridge") || itemPath.contains("shot") || itemPath.contains("ball"))) {
+                        containsAnyAmmoKeyword(itemRes.getPath())) {
                         return true;
                     }
                 }
